@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ApplicationIcon>../../wmpl_recap_icon_bar.ico</ApplicationIcon>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../WmplWrap/WmplWrap.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="TagLibSharp" Version="2.3.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <Resource Include="../../wmpl_recap_icon_header.png" Link="Assets/wmpl_recap_icon_header.png" />
+    <Resource Include="../../wmpl_recap_icon_bar.png" Link="Assets/wmpl_recap_icon_bar.png" />
+    <Resource Include="../../wmpl_recap_icon_header.ico" Link="Assets/wmpl_recap_icon_header.ico" />
+    <Content Include="../../wmpl_recap_icon_bar.ico" Link="Assets/wmpl_recap_icon_bar.ico" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

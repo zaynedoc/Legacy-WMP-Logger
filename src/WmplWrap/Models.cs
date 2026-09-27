@@ -7,7 +7,8 @@ public sealed record TrackSnapshot(
     string Artist,
     string Album,
     string Duration,
-    long PlayCount);
+    long PlayCount,
+    string AlbumArtUrl = "");
 
 public sealed record LibrarySnapshot(
     int SchemaVersion,

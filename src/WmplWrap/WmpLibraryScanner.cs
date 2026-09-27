@@ -37,10 +37,14 @@ public sealed class WmpLibraryScanner
                     if (!string.Equals(mediaType, "audio", StringComparison.OrdinalIgnoreCase)) continue;
 
                     var source = Get(media, "SourceURL");
+                    var title = Get(media, "Title");
+                    var artist = Get(media, "Author");
+                    var album = Get(media, "WM/AlbumTitle");
+                    var duration = Get(media, "Duration");
                     var track = new TrackSnapshot(
-                        CreateId(source, Get(media, "Title"), Get(media, "Author"), Get(media, "WM/AlbumTitle"), Get(media, "Duration")),
-                        source, Get(media, "Title"), Get(media, "Author"), Get(media, "WM/AlbumTitle"), Get(media, "Duration"),
-                        ParseCount(Get(media, "UserPlayCount")));
+                        CreateId(source, title, artist, album, duration),
+                        source, title, artist, album, duration,
+                        ParseCount(Get(media, "UserPlayCount")), Get(media, "WM/AlbumCoverURL"));
 
                     // A source can appear more than once in WMP. Keep the highest observed count.
                     if (!tracks.TryGetValue(track.Id, out var existing) || track.PlayCount > existing.PlayCount)
