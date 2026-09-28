@@ -78,7 +78,9 @@ The installer supplies the compatible SignTool and Azure.CodeSigning.Dlib.dll re
     } | ConvertTo-Json
 
     try {
-        Set-Content -LiteralPath $metadataPath -Value $metadata -Encoding UTF8
+        # Azure.CodeSigning.Dlib reads its metadata as raw JSON and rejects the UTF-8 BOM
+        # emitted by Windows PowerShell's Set-Content -Encoding UTF8.
+        [System.IO.File]::WriteAllText($metadataPath, $metadata, [System.Text.UTF8Encoding]::new($false))
 
         Write-Host "Signing $executablePath with Azure Artifact Signing..."
         Write-Host 'Your browser may open if Azure authentication is required.'
