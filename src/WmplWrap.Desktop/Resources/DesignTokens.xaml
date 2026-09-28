@@ -84,6 +84,113 @@
     </Style.Triggers>
   </Style>
 
+  <Style x:Key="PeriodComboBox" TargetType="{x:Type ComboBox}">
+    <Setter Property="FontFamily" Value="{StaticResource Font.Body}" />
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="Foreground" Value="{StaticResource Brush.Ink}" />
+    <Setter Property="Background" Value="{StaticResource Brush.Surface}" />
+    <Setter Property="BorderBrush" Value="{StaticResource Brush.Rule}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="Padding" Value="12,5,30,5" />
+    <Setter Property="MinHeight" Value="32" />
+    <Setter Property="ItemContainerStyle">
+      <Setter.Value>
+        <Style TargetType="{x:Type ComboBoxItem}">
+          <Setter Property="FontFamily" Value="{StaticResource Font.Body}" />
+          <Setter Property="FontSize" Value="12" />
+          <Setter Property="Foreground" Value="{StaticResource Brush.Ink}" />
+          <Setter Property="Padding" Value="12,5" />
+          <Setter Property="Template">
+            <Setter.Value>
+              <ControlTemplate TargetType="{x:Type ComboBoxItem}">
+                <Border x:Name="ItemFrame" Background="Transparent" Padding="{TemplateBinding Padding}">
+                  <ContentPresenter />
+                </Border>
+                <ControlTemplate.Triggers>
+                  <Trigger Property="IsHighlighted" Value="True"><Setter TargetName="ItemFrame" Property="Background" Value="{StaticResource Brush.AccentLight}" /></Trigger>
+                  <Trigger Property="IsSelected" Value="True"><Setter TargetName="ItemFrame" Property="Background" Value="{StaticResource Brush.SurfaceMuted}" /></Trigger>
+                </ControlTemplate.Triggers>
+              </ControlTemplate>
+            </Setter.Value>
+          </Setter>
+        </Style>
+      </Setter.Value>
+    </Setter>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="{x:Type ComboBox}">
+          <Grid>
+            <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press"
+                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+              <ToggleButton.Template>
+                <ControlTemplate TargetType="{x:Type ToggleButton}">
+                  <Border x:Name="Frame"
+                          Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}"
+                          BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}"
+                          BorderThickness="{Binding BorderThickness, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}"
+                          CornerRadius="3">
+                    <Grid>
+                      <ContentPresenter Margin="{Binding Padding, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}"
+                                        Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}"
+                                        ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}"
+                                        ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}"
+                                        VerticalAlignment="Center" RecognizesAccessKey="True" />
+                      <Path HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,11,0"
+                            Data="M 0 0 L 8 0 L 4 4 Z" Fill="{StaticResource Brush.MutedInk}" />
+                    </Grid>
+                  </Border>
+                  <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Frame" Property="Background" Value="{StaticResource Brush.AccentLight}" /></Trigger>
+                    <Trigger Property="IsPressed" Value="True"><Setter TargetName="Frame" Property="Background" Value="{StaticResource Brush.SurfaceMuted}" /></Trigger>
+                    <Trigger Property="IsChecked" Value="True"><Setter TargetName="Frame" Property="Background" Value="{StaticResource Brush.SurfaceMuted}" /></Trigger>
+                  </ControlTemplate.Triggers>
+                </ControlTemplate>
+              </ToggleButton.Template>
+            </ToggleButton>
+            <Popup x:Name="PART_Popup" Placement="Bottom" AllowsTransparency="True" PopupAnimation="Slide"
+                   IsOpen="{TemplateBinding IsDropDownOpen}" Focusable="False">
+              <Border MinWidth="{TemplateBinding ActualWidth}" MaxHeight="{TemplateBinding MaxDropDownHeight}"
+                      Background="{StaticResource Brush.Surface}" BorderBrush="{StaticResource Brush.Rule}" BorderThickness="1" SnapsToDevicePixels="True">
+                <ScrollViewer Margin="0" SnapsToDevicePixels="True" CanContentScroll="True">
+                  <ItemsPresenter />
+                </ScrollViewer>
+              </Border>
+            </Popup>
+          </Grid>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="BorderBrush" Value="{StaticResource Brush.Accent}" /></Trigger>
+            <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55" /></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <Style x:Key="BaselineToggle" TargetType="{x:Type CheckBox}">
+    <Setter Property="FontFamily" Value="{StaticResource Font.Body}" />
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="Foreground" Value="{StaticResource Brush.Ink}" />
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="{x:Type CheckBox}">
+          <StackPanel Orientation="Horizontal">
+            <Border x:Name="Frame" Width="16" Height="16" Margin="0,0,8,0" VerticalAlignment="Center"
+                    Background="{StaticResource Brush.Surface}" BorderBrush="{StaticResource Brush.Rule}" BorderThickness="1" CornerRadius="2">
+              <Path x:Name="CheckMark" Data="M 3 8 L 6.5 11.5 L 13 4" Stroke="{StaticResource Brush.White}" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Opacity="0" />
+            </Border>
+            <ContentPresenter VerticalAlignment="Center" RecognizesAccessKey="True" />
+          </StackPanel>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Frame" Property="Background" Value="{StaticResource Brush.AccentLight}" /></Trigger>
+            <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Frame" Property="BorderBrush" Value="{StaticResource Brush.Accent}" /></Trigger>
+            <Trigger Property="IsChecked" Value="True"><Setter TargetName="Frame" Property="Background" Value="{StaticResource Brush.Accent}" /><Setter TargetName="Frame" Property="BorderBrush" Value="{StaticResource Brush.AccentPressed}" /><Setter TargetName="CheckMark" Property="Opacity" Value="1" /></Trigger>
+            <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55" /></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
   <Style x:Key="RailButton" TargetType="{x:Type Button}" BasedOn="{StaticResource {x:Type Button}}">
     <Setter Property="HorizontalContentAlignment" Value="Left" />
     <Setter Property="Foreground" Value="{StaticResource Brush.White}" />

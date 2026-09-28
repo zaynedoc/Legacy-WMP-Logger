@@ -1,7 +1,10 @@
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows.Interop;
+using System.Windows.Media;
 
 namespace WmplWrap.Desktop;
 
@@ -27,6 +30,25 @@ public partial class MainWindow : Window
         _taskbarIcon = LoadImage(IntPtr.Zero, iconPath, ImageIcon, 0, 0, LoadFromFile);
         if (_taskbarIcon != IntPtr.Zero)
             SendMessage(new WindowInteropHelper(this).Handle, WmSetIcon, IconBig, _taskbarIcon);
+    }
+
+    private void OpenInWmpDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        var item = FindAncestor<ListBoxItem>(e.OriginalSource as DependencyObject);
+        if (item?.DataContext is not { } target || DataContext is not DashboardViewModel viewModel) return;
+
+        viewModel.OpenInWmp(target);
+        e.Handled = true;
+    }
+
+    private static T? FindAncestor<T>(DependencyObject? current) where T : DependencyObject
+    {
+        while (current is not null)
+        {
+            if (current is T match) return match;
+            current = VisualTreeHelper.GetParent(current);
+        }
+        return null;
     }
 
     [DllImport("user32.dll", CharSet = CharSet.Auto)]

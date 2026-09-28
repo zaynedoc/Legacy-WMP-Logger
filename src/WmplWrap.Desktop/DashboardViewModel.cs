@@ -3,26 +3,53 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Net;
+using System.Net.Http;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
+using LiveChartsCore;
+using LiveChartsCore.SkiaSharpView;
+using LiveChartsCore.SkiaSharpView.Painting;
+using SkiaSharp;
 
 namespace WmplWrap.Desktop;
 
 public sealed class DashboardViewModel : INotifyPropertyChanged
 {
     private const string ScheduledTaskName = "WMPL Wrap Daily Snapshot";
-    private const string DefaultRepositoryUrl = "https://github.com/zaynedoc/Legacy-WMP-Logger";
+    private const string DefaultRepositoryUrl = "https://github.com/zaynedoc/WMPL-Wrap";
     private static string _sessionPeriod = "All time";
     private readonly SnapshotStore _store;
+    private readonly DashboardSettingsStore _settingsStore;
+    private IReadOnlyList<LibrarySnapshot> _snapshots = [];
     private DashboardPage _page = DashboardPage.Overview;
     private DataView _dataView = DataView.Tracks;
+    private DashboardSnapshotOption? _selectedSnapshot;
     private bool _isCapturing;
+    private bool _includeBaselineSnapshot = true;
+    private bool _openInWmpOnDoubleClick = true;
+    private bool _isCheckingForUpdates;
+    private DashboardGraphRange _graphRange = DashboardGraphRange.PastMonth;
+    private DashboardGraphMeasure _graphMeasure = DashboardGraphMeasure.Listens;
+    private DashboardGraphGrouping _graphGrouping = DashboardGraphGrouping.Total;
+    private DashboardGraphGranularity _graphGranularity = DashboardGraphGranularity.Auto;
+    private DashboardGraphMode _graphMode = DashboardGraphMode.Activity;
+    private int _graphTopSeriesLimit = 5;
+    private bool _combineRemainingGraphSeries = true;
+    private DateTime? _graphStartDate;
+    private DateTime? _graphEndDate;
+    private ISeries[] _graphSeries = [];
+    private Axis[] _graphXAxes = [];
+    private Axis[] _graphYAxes = [];
     private string _snapshotSummary = "Loading local snapshot history";
     private string _latestSnapshotCaption = "";
     private string _latestSnapshotSummary = "";
     private string _latestSnapshotEmptyMessage = "";
+    private string _snapshotSummaryLabel = "RECORDED INTERVAL";
+    private string _snapshotListenColumnHeader = "NEW LISTENS";
     private string _topCaption = "";
     private string _topEmptyMessage = "";
     private string _totalListens = "-";
@@ -31,11 +58,18 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
     private string _metricTopArtist = "-";
     private string _metricTopArtistCount = "";
     private string _schedulerState = "Checking automatic snapshots";
+    private string _updateStatus = "Check GitHub for a newer signed release";
+    private string _graphSummary = "Loading local listening activity";
+    private string _graphEmptyMessage = "";
 
     public DashboardViewModel()
     {
-        DataDirectory = Environment.GetEnvironmentVariable("WMPL_WRAP_DATA") ?? Path.Combine(Environment.CurrentDirectory, "data");
+        DataDirectory = ResolveDataDirectory();
         _store = new SnapshotStore(DataDirectory);
+        _settingsStore = new DashboardSettingsStore(DataDirectory);
+        var preferences = _settingsStore.Load();
+        _includeBaselineSnapshot = preferences.IncludeBaselineSnapshot;
+        _openInWmpOnDoubleClick = preferences.OpenInWmpOnDoubleClick;
         RefreshCommand = new RelayCommand(_ => Refresh());
         CaptureCommand = new AsyncRelayCommand(CaptureAsync, () => !_isCapturing);
         NavigateCommand = new RelayCommand(parameter => Navigate(parameter?.ToString()));
@@ -43,18 +77,29 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
         ForwardCommand = new RelayCommand(_ => MovePage(1));
         OpenSchedulerCommand = new RelayCommand(_ => OpenScheduler());
         DisableSchedulerCommand = new AsyncRelayCommand(DisableSchedulerAsync, () => true);
+        ShowSnapshotStatusCommand = new RelayCommand(_ => ShowSnapshotStatus());
         OpenGitHubCommand = new RelayCommand(_ => OpenGitHub());
+        OpenReleasesCommand = new RelayCommand(_ => OpenReleases());
+        CheckForUpdatesCommand = new AsyncRelayCommand(CheckForUpdatesAsync, () => !_isCheckingForUpdates);
         Refresh();
         RefreshSchedulerState();
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
     public ObservableCollection<DashboardSnapshotChange> LatestSnapshotTracks { get; } = [];
+    public ObservableCollection<DashboardSnapshotOption> SnapshotOptions { get; } = [];
     public ObservableCollection<DashboardSong> TopTracks { get; } = [];
     public ObservableCollection<DashboardAggregate> TopAlbums { get; } = [];
     public ObservableCollection<DashboardAggregate> TopArtists { get; } = [];
     public ObservableCollection<DashboardDataRow> DataRows { get; } = [];
+    public ObservableCollection<DashboardGraphLegendItem> GraphLegendItems { get; } = [];
     public IReadOnlyList<string> PeriodOptions { get; } = ["All time", "Past week", "Past month", "Past year"];
+    public IReadOnlyList<string> GraphRangeOptions { get; } = ["Past week", "Past month", "Past year", "All time", "Custom range"];
+    public IReadOnlyList<string> GraphMeasureOptions { get; } = ["Listens", "Listening time", "Tracks listened"];
+    public IReadOnlyList<string> GraphGroupingOptions { get; } = ["Total", "Artist", "Album", "Track"];
+    public IReadOnlyList<string> GraphGranularityOptions { get; } = ["Auto", "Day", "Week", "Month"];
+    public IReadOnlyList<string> GraphModeOptions { get; } = ["Activity", "Cumulative", "Breakdown"];
+    public IReadOnlyList<string> GraphTopSeriesOptions { get; } = ["Top 5", "Top 10", "Top 20", "All series"];
     public ICommand RefreshCommand { get; }
     public ICommand CaptureCommand { get; }
     public ICommand NavigateCommand { get; }
@@ -62,13 +107,18 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
     public ICommand ForwardCommand { get; }
     public ICommand OpenSchedulerCommand { get; }
     public ICommand DisableSchedulerCommand { get; }
+    public ICommand ShowSnapshotStatusCommand { get; }
     public ICommand OpenGitHubCommand { get; }
+    public ICommand OpenReleasesCommand { get; }
+    public ICommand CheckForUpdatesCommand { get; }
     public string DataDirectory { get; }
     public string DataLocationLabel => $"Data: {DataDirectory}";
     public string SnapshotSummary { get => _snapshotSummary; private set => Set(ref _snapshotSummary, value); }
     public string LatestSnapshotCaption { get => _latestSnapshotCaption; private set => Set(ref _latestSnapshotCaption, value); }
     public string LatestSnapshotSummary { get => _latestSnapshotSummary; private set => Set(ref _latestSnapshotSummary, value); }
     public string LatestSnapshotEmptyMessage { get => _latestSnapshotEmptyMessage; private set => Set(ref _latestSnapshotEmptyMessage, value); }
+    public string SnapshotSummaryLabel { get => _snapshotSummaryLabel; private set => Set(ref _snapshotSummaryLabel, value); }
+    public string SnapshotListenColumnHeader { get => _snapshotListenColumnHeader; private set => Set(ref _snapshotListenColumnHeader, value); }
     public string TopCaption { get => _topCaption; private set => Set(ref _topCaption, value); }
     public string TopEmptyMessage { get => _topEmptyMessage; private set => Set(ref _topEmptyMessage, value); }
     public string TotalListens { get => _totalListens; private set => Set(ref _totalListens, value); }
@@ -77,11 +127,23 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
     public string MetricTopArtist { get => _metricTopArtist; private set => Set(ref _metricTopArtist, value); }
     public string MetricTopArtistCount { get => _metricTopArtistCount; private set => Set(ref _metricTopArtistCount, value); }
     public string SchedulerState { get => _schedulerState; private set => Set(ref _schedulerState, value); }
+    public string UpdateStatus { get => _updateStatus; private set => Set(ref _updateStatus, value); }
+    public string GraphSummary { get => _graphSummary; private set => Set(ref _graphSummary, value); }
+    public string GraphEmptyMessage { get => _graphEmptyMessage; private set => Set(ref _graphEmptyMessage, value); }
+    public ISeries[] GraphSeries { get => _graphSeries; private set => Set(ref _graphSeries, value); }
+    public Axis[] GraphXAxes { get => _graphXAxes; private set => Set(ref _graphXAxes, value); }
+    public Axis[] GraphYAxes { get => _graphYAxes; private set => Set(ref _graphYAxes, value); }
     public string CaptureButtonText => _isCapturing ? "Reading WMP" : "Capture snapshot";
     public bool CanCapture => !_isCapturing;
+    public bool CanCheckForUpdates => !_isCheckingForUpdates;
+    public string UpdateButtonText => _isCheckingForUpdates ? "Checking GitHub" : "Check for updates";
+    public Visibility GraphChartVisibility => GraphSeries.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility GraphEmptyVisibility => GraphSeries.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility GraphCustomDateVisibility => _graphRange == DashboardGraphRange.Custom ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility GraphSeriesOptionsVisibility => _graphGrouping == DashboardGraphGrouping.Total ? Visibility.Collapsed : Visibility.Visible;
     public string Breadcrumbs => _page switch
     {
-        DashboardPage.LatestSnapshot => "Library  >  Latest snapshot",
+        DashboardPage.LatestSnapshot => "Data  >  Snapshot history",
         DashboardPage.Graphs => "Library  >  Graphs",
         DashboardPage.Data => $"Data  >  {DataTitle}",
         DashboardPage.Settings => "Library  >  Settings",
@@ -97,6 +159,115 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
     public string DataTitle => _dataView switch { DataView.Albums => "Top albums", DataView.Artists => "Top artists", _ => "Top songs" };
     public string DataCaption => TopCaption;
     public string DataContextColumn => _dataView switch { DataView.Albums => "TRACKS", DataView.Artists => "TOP ALBUM", _ => "ALBUM" };
+    public string AppVersion => $"v{GetType().Assembly.GetName().Version?.ToString(3) ?? "1.1.0"}";
+
+    public bool IncludeBaselineSnapshot
+    {
+        get => _includeBaselineSnapshot;
+        set
+        {
+            if (_includeBaselineSnapshot == value) return;
+            _includeBaselineSnapshot = value;
+            SavePreferences();
+            OnPropertyChanged();
+            Refresh();
+        }
+    }
+
+    public bool OpenInWmpOnDoubleClick
+    {
+        get => _openInWmpOnDoubleClick;
+        set
+        {
+            if (_openInWmpOnDoubleClick == value) return;
+            _openInWmpOnDoubleClick = value;
+            SavePreferences();
+            OnPropertyChanged();
+        }
+    }
+
+    public string SelectedGraphRange
+    {
+        get => GraphRangeLabel(_graphRange);
+        set
+        {
+            var parsed = value == "Custom range" ? DashboardGraphRange.Custom : ParseGraphOption<DashboardGraphRange>(value);
+            if (_graphRange == parsed) return;
+            _graphRange = parsed;
+            if (parsed == DashboardGraphRange.Custom && (_graphStartDate is null || _graphEndDate is null))
+            {
+                var anchor = _snapshots.Count == 0 ? DateTime.Today : ToEastern(_snapshots[^1].CapturedAtUtc).Date;
+                _graphStartDate = anchor.AddMonths(-1);
+                _graphEndDate = anchor;
+                OnPropertyChanged(nameof(GraphStartDate));
+                OnPropertyChanged(nameof(GraphEndDate));
+            }
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(GraphCustomDateVisibility));
+            PopulateGraph(_snapshots);
+        }
+    }
+
+    public string SelectedGraphMeasure
+    {
+        get => GraphMeasureLabel(_graphMeasure);
+        set { var parsed = ParseGraphOption<DashboardGraphMeasure>(value); if (_graphMeasure != parsed) { _graphMeasure = parsed; OnPropertyChanged(); PopulateGraph(_snapshots); } }
+    }
+
+    public string SelectedGraphGrouping
+    {
+        get => _graphGrouping.ToString();
+        set { var parsed = ParseGraphOption<DashboardGraphGrouping>(value); if (_graphGrouping != parsed) { _graphGrouping = parsed; OnPropertyChanged(); PopulateGraph(_snapshots); } }
+    }
+
+    public string SelectedGraphGranularity
+    {
+        get => _graphGranularity.ToString();
+        set { var parsed = ParseGraphOption<DashboardGraphGranularity>(value); if (_graphGranularity != parsed) { _graphGranularity = parsed; OnPropertyChanged(); PopulateGraph(_snapshots); } }
+    }
+
+    public string SelectedGraphMode
+    {
+        get => _graphMode.ToString();
+        set { var parsed = ParseGraphOption<DashboardGraphMode>(value); if (_graphMode != parsed) { _graphMode = parsed; OnPropertyChanged(); PopulateGraph(_snapshots); } }
+    }
+
+    public string SelectedGraphTopSeries
+    {
+        get => _graphTopSeriesLimit <= 0 ? "All series" : $"Top {_graphTopSeriesLimit}";
+        set
+        {
+            var limit = value switch { "Top 10" => 10, "Top 20" => 20, "All series" => 0, _ => 5 };
+            if (_graphTopSeriesLimit == limit) return;
+            _graphTopSeriesLimit = limit;
+            OnPropertyChanged();
+            PopulateGraph(_snapshots);
+        }
+    }
+
+    public bool CombineRemainingGraphSeries
+    {
+        get => _combineRemainingGraphSeries;
+        set
+        {
+            if (_combineRemainingGraphSeries == value) return;
+            _combineRemainingGraphSeries = value;
+            OnPropertyChanged();
+            PopulateGraph(_snapshots);
+        }
+    }
+
+    public DateTime? GraphStartDate
+    {
+        get => _graphStartDate;
+        set { if (_graphStartDate == value) return; _graphStartDate = value; OnPropertyChanged(); PopulateGraph(_snapshots); }
+    }
+
+    public DateTime? GraphEndDate
+    {
+        get => _graphEndDate;
+        set { if (_graphEndDate == value) return; _graphEndDate = value; OnPropertyChanged(); PopulateGraph(_snapshots); }
+    }
 
     public string SelectedPeriod
     {
@@ -107,6 +278,18 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
             _sessionPeriod = value;
             OnPropertyChanged();
             PopulateInsights(_store.LoadAll());
+        }
+    }
+
+    public DashboardSnapshotOption? SelectedSnapshot
+    {
+        get => _selectedSnapshot;
+        set
+        {
+            if (_selectedSnapshot?.CapturedAtUtc == value?.CapturedAtUtc) return;
+            _selectedSnapshot = value;
+            OnPropertyChanged();
+            PopulateSelectedSnapshot(_snapshots, value);
         }
     }
 
@@ -147,13 +330,20 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
         try { Populate(_store.LoadAll()); }
         catch
         {
+            _snapshots = [];
+            SnapshotOptions.Clear();
+            _selectedSnapshot = null;
+            OnPropertyChanged(nameof(SelectedSnapshot));
             ClearAll();
             SnapshotSummary = "The local snapshot history could not be read";
             LatestSnapshotCaption = "Snapshot history unavailable";
             LatestSnapshotSummary = "No interval data is available";
             LatestSnapshotEmptyMessage = "Check the data location shown below";
+            SnapshotSummaryLabel = "RECORDED INTERVAL";
+            SnapshotListenColumnHeader = "NEW LISTENS";
             TopCaption = "Snapshot history unavailable";
             TopEmptyMessage = "Check the data location shown below";
+            PopulateGraph([]);
         }
     }
 
@@ -166,7 +356,7 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
         {
             var snapshot = await StaWorker.Run(() => new WmpLibraryScanner().Capture(DateTimeOffset.UtcNow));
             _store.Save(snapshot);
-            Populate(_store.LoadAll());
+            Populate(_store.LoadAll(), selectLatestSnapshot: true);
         }
         finally
         {
@@ -176,18 +366,25 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
         }
     }
 
-    private void Populate(IReadOnlyList<LibrarySnapshot> snapshots)
+    private void Populate(IReadOnlyList<LibrarySnapshot> snapshots, bool selectLatestSnapshot = false)
     {
+        _snapshots = snapshots;
         if (snapshots.Count == 0)
         {
+            SnapshotOptions.Clear();
+            _selectedSnapshot = null;
+            OnPropertyChanged(nameof(SelectedSnapshot));
             ClearAll();
             SnapshotSummary = "No local baseline yet";
             LatestSnapshotCaption = "No changes observed";
             LatestSnapshotSummary = "Capture a first snapshot to begin";
             LatestSnapshotEmptyMessage = "Capture a first snapshot to begin";
+            SnapshotSummaryLabel = "RECORDED INTERVAL";
+            SnapshotListenColumnHeader = "NEW LISTENS";
             TopCaption = "Waiting for a WMP library snapshot";
             TopEmptyMessage = "Your first snapshot will populate this list";
             MetricPeriodCaption = SelectedPeriod;
+            PopulateGraph(snapshots);
             return;
         }
 
@@ -195,32 +392,209 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
         SnapshotSummary = snapshots.Count == 1
             ? $"First baseline saved {ToEastern(latest.CapturedAtUtc):MMM d h:mm tt}"
             : $"{snapshots.Count:N0} snapshots recorded  ·  latest {ToEastern(latest.CapturedAtUtc):MMM d h:mm tt}";
-        PopulateLatestSnapshot(snapshots);
+        PopulateSnapshotHistory(snapshots, selectLatestSnapshot);
         PopulateInsights(snapshots);
+        PopulateGraph(snapshots);
     }
 
-    private void PopulateLatestSnapshot(IReadOnlyList<LibrarySnapshot> snapshots)
+    private void PopulateGraph(IReadOnlyList<LibrarySnapshot> snapshots)
+    {
+        var graph = DashboardGraphBuilder.Build(snapshots, new DashboardGraphOptions(
+            _graphRange,
+            _graphMeasure,
+            _graphGrouping,
+            _graphGranularity,
+            _graphMode,
+            _graphStartDate,
+            _graphEndDate,
+            _includeBaselineSnapshot,
+            _graphTopSeriesLimit,
+            _combineRemainingGraphSeries));
+
+        GraphSummary = graph.Summary;
+        GraphEmptyMessage = graph.EmptyMessage;
+        GraphXAxes =
+        [
+            new Axis
+            {
+                Labels = graph.Labels,
+                LabelsPaint = new SolidColorPaint(SKColor.Parse("#567085")),
+                SeparatorsPaint = new SolidColorPaint(SKColor.Parse("#DCE7F3")),
+                TextSize = 11,
+                ForceStepToMin = true,
+                MinStep = 1
+            }
+        ];
+        GraphYAxes =
+        [
+            new Axis
+            {
+                Labeler = value => FormatGraphValue(value, _graphMeasure),
+                LabelsPaint = new SolidColorPaint(SKColor.Parse("#567085")),
+                SeparatorsPaint = new SolidColorPaint(SKColor.Parse("#DCE7F3")),
+                TextSize = 11,
+                MinLimit = 0
+            }
+        ];
+
+        GraphSeries = graph.Series.Select((series, index) => CreateGraphSeries(series, index, graph.Tooltips)).ToArray();
+        GraphLegendItems.Clear();
+        for (var index = 0; index < graph.Series.Length; index++)
+            GraphLegendItems.Add(new DashboardGraphLegendItem(graph.Series[index].Name, ToBrush(GraphColors[index % GraphColors.Length])));
+        OnPropertyChanged(nameof(GraphChartVisibility));
+        OnPropertyChanged(nameof(GraphEmptyVisibility));
+        OnPropertyChanged(nameof(GraphSeriesOptionsVisibility));
+    }
+
+    private ISeries CreateGraphSeries(DashboardGraphSeries series, int colorIndex, IReadOnlyList<string> tooltips)
+    {
+        var color = GraphColors[colorIndex % GraphColors.Length];
+        Func<LiveChartsCore.Kernel.ChartPoint, string> xTooltip = point => GraphTooltip(tooltips, point.Index);
+        Func<LiveChartsCore.Kernel.ChartPoint, string> yTooltip = point => FormatGraphValue(point.Coordinate.PrimaryValue, _graphMeasure);
+
+        if (_graphMode == DashboardGraphMode.Cumulative)
+        {
+            return new LineSeries<double>
+            {
+                Name = series.Name,
+                Values = series.Values,
+                Stroke = new SolidColorPaint(color) { StrokeThickness = 3 },
+                Fill = null,
+                GeometrySize = 7,
+                XToolTipLabelFormatter = xTooltip,
+                YToolTipLabelFormatter = yTooltip
+            };
+        }
+
+        if (_graphMode == DashboardGraphMode.Breakdown || _graphGrouping != DashboardGraphGrouping.Total)
+        {
+            return new ExactPointStackedColumnSeries
+            {
+                Name = series.Name,
+                Values = series.Values,
+                Fill = new SolidColorPaint(color),
+                Stroke = null,
+                StackGroup = 0,
+                XToolTipLabelFormatter = xTooltip,
+                YToolTipLabelFormatter = yTooltip
+            };
+        }
+
+        return new ColumnSeries<double>
+        {
+            Name = series.Name,
+            Values = series.Values,
+            Fill = new SolidColorPaint(color),
+            Stroke = null,
+            MaxBarWidth = 42,
+            XToolTipLabelFormatter = xTooltip,
+            YToolTipLabelFormatter = yTooltip
+        };
+    }
+
+    private static string GraphTooltip(IReadOnlyList<string> tooltips, int index) => index >= 0 && index < tooltips.Count ? tooltips[index] : "Observed snapshot interval";
+    private static string FormatGraphValue(double value, DashboardGraphMeasure measure) => measure == DashboardGraphMeasure.ListeningTime
+        ? FormatDuration(value)
+        : value.ToString("N0", CultureInfo.CurrentCulture);
+    private static T ParseGraphOption<T>(string value) where T : struct, Enum
+    {
+        var normalized = value.Replace(" ", "", StringComparison.Ordinal);
+        return Enum.TryParse<T>(normalized, true, out var parsed) ? parsed : default;
+    }
+    private static string GraphRangeLabel(DashboardGraphRange range) => range switch
+    {
+        DashboardGraphRange.PastWeek => "Past week",
+        DashboardGraphRange.PastMonth => "Past month",
+        DashboardGraphRange.PastYear => "Past year",
+        DashboardGraphRange.Custom => "Custom range",
+        _ => "All time"
+    };
+    private static string GraphMeasureLabel(DashboardGraphMeasure measure) => measure switch
+    {
+        DashboardGraphMeasure.ListeningTime => "Listening time",
+        DashboardGraphMeasure.TracksListened => "Tracks listened",
+        _ => "Listens"
+    };
+    private static readonly SKColor[] GraphColors =
+    [
+        SKColor.Parse("#176DB4"), SKColor.Parse("#237548"), SKColor.Parse("#935B16"),
+        SKColor.Parse("#7851A9"), SKColor.Parse("#A2436D"), SKColor.Parse("#75879A")
+    ];
+    private static SolidColorBrush ToBrush(SKColor color) => new(Color.FromArgb(color.Alpha, color.Red, color.Green, color.Blue));
+
+    private void PopulateSnapshotHistory(IReadOnlyList<LibrarySnapshot> snapshots, bool selectLatestSnapshot)
+    {
+        var priorSelection = _selectedSnapshot?.CapturedAtUtc;
+        SnapshotOptions.Clear();
+        for (var index = snapshots.Count - 1; index >= 0; index--)
+        {
+            var capturedAt = snapshots[index].CapturedAtUtc;
+            var label = ToEastern(capturedAt).ToString("MMM d, yyyy h:mm tt", CultureInfo.CurrentCulture);
+            SnapshotOptions.Add(new DashboardSnapshotOption(capturedAt, index == snapshots.Count - 1 ? $"{label} (latest)" : label));
+        }
+
+        _selectedSnapshot = selectLatestSnapshot
+            ? SnapshotOptions.FirstOrDefault()
+            : SnapshotOptions.FirstOrDefault(option => option.CapturedAtUtc == priorSelection) ?? SnapshotOptions.FirstOrDefault();
+        OnPropertyChanged(nameof(SelectedSnapshot));
+        PopulateSelectedSnapshot(snapshots, _selectedSnapshot);
+    }
+
+    private void PopulateSelectedSnapshot(IReadOnlyList<LibrarySnapshot> snapshots, DashboardSnapshotOption? selection)
     {
         LatestSnapshotTracks.Clear();
-        if (snapshots.Count < 2)
+        if (selection is null)
         {
-            LatestSnapshotCaption = "Needs a second snapshot";
-            LatestSnapshotSummary = "The first snapshot is your baseline";
-            LatestSnapshotEmptyMessage = "Capture one more snapshot to calculate new listens";
+            LatestSnapshotCaption = "No snapshots recorded";
+            LatestSnapshotSummary = "Capture a first snapshot to begin";
+            LatestSnapshotEmptyMessage = "Capture a first snapshot to begin";
+            SnapshotSummaryLabel = "RECORDED INTERVAL";
+            SnapshotListenColumnHeader = "NEW LISTENS";
             return;
         }
 
-        var earlier = snapshots[^2];
-        var latest = snapshots[^1];
-        var report = Reporting.Compare(earlier, latest);
+        var selectedIndex = -1;
+        for (var index = 0; index < snapshots.Count; index++)
+        {
+            if (snapshots[index].CapturedAtUtc == selection.CapturedAtUtc)
+            {
+                selectedIndex = index;
+                break;
+            }
+        }
+
+        if (selectedIndex <= 0)
+        {
+            var baselineRows = snapshots[0].Tracks
+                .Where(track => track.PlayCount > 0)
+                .OrderByDescending(track => track.PlayCount)
+                .ThenBy(track => track.Title, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            LatestSnapshotCaption = $"Baseline captured {ToEastern(selection.CapturedAtUtc):MMM d h:mm tt}";
+            LatestSnapshotSummary = baselineRows.Length == 0
+                ? "No recorded WMP plays at baseline"
+                : $"{baselineRows.Length:N0} tracks with {baselineRows.Sum(track => track.PlayCount):N0} recorded WMP plays";
+            LatestSnapshotEmptyMessage = "No recorded WMP plays at this baseline";
+            SnapshotSummaryLabel = "BASELINE SNAPSHOT";
+            SnapshotListenColumnHeader = "BASELINE PLAYS";
+            foreach (var track in baselineRows)
+                LatestSnapshotTracks.Add(DashboardSnapshotChange.FromBaseline(track, LatestSnapshotTracks.Count + 1));
+            return;
+        }
+
+        var earlier = snapshots[selectedIndex - 1];
+        var selected = snapshots[selectedIndex];
+        var report = Reporting.Compare(earlier, selected);
         var increases = report.Rows.Where(row => row.Listens > 0).ToArray();
-        LatestSnapshotCaption = $"Changes from {ToEastern(earlier.CapturedAtUtc):MMM d h:mm tt} to {ToEastern(latest.CapturedAtUtc):MMM d h:mm tt}";
+        LatestSnapshotCaption = $"Changes from {ToEastern(earlier.CapturedAtUtc):MMM d h:mm tt} to {ToEastern(selected.CapturedAtUtc):MMM d h:mm tt}";
         LatestSnapshotSummary = increases.Length == 0
             ? "No observed play-count increases"
             : $"{increases.Length:N0} tracks with {increases.Sum(row => row.Listens):N0} new listens";
         foreach (var row in increases)
             LatestSnapshotTracks.Add(DashboardSnapshotChange.From(row.Track, row.Listens, LatestSnapshotTracks.Count + 1));
-        LatestSnapshotEmptyMessage = "No play-count increases observed between the latest snapshots";
+        LatestSnapshotEmptyMessage = "No play-count increases observed in this snapshot interval";
+        SnapshotSummaryLabel = "RECORDED INTERVAL";
+        SnapshotListenColumnHeader = "NEW LISTENS";
     }
 
     private void PopulateInsights(IReadOnlyList<LibrarySnapshot> snapshots)
@@ -240,12 +614,12 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
         foreach (var group in entries.GroupBy(entry => EmptyAsUnknown(entry.Track.Album, "Unknown album"))
                      .Select(group => new { Name = group.Key, Count = group.Sum(entry => entry.Count), First = group.First().Track })
                      .OrderByDescending(group => group.Count).ThenBy(group => group.Name).Take(5))
-            TopAlbums.Add(new DashboardAggregate(group.Name, group.First.Artist, $"{group.Count:N0}", AlbumArtResolver.For(group.First)));
+            TopAlbums.Add(new DashboardAggregate(group.Name, group.First.Artist, $"{group.Count:N0}", AlbumArtResolver.For(group.First), new WmpOpenTarget(WmpOpenKind.Album, group.First.SourceUrl, group.Name)));
 
         foreach (var group in entries.GroupBy(entry => EmptyAsUnknown(entry.Track.Artist, "Unknown artist"))
                      .Select(group => new { Name = group.Key, Count = group.Sum(entry => entry.Count), First = group.First().Track })
                      .OrderByDescending(group => group.Count).ThenBy(group => group.Name).Take(5))
-            TopArtists.Add(new DashboardAggregate(group.Name, group.First.Album, $"{group.Count:N0}", AlbumArtResolver.For(group.First)));
+            TopArtists.Add(new DashboardAggregate(group.Name, group.First.Album, $"{group.Count:N0}", AlbumArtResolver.For(group.First), new WmpOpenTarget(WmpOpenKind.Artist, group.First.SourceUrl, group.Name)));
 
         PopulateDataRows(entries);
 
@@ -262,7 +636,7 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
         if (_dataView == DataView.Tracks)
         {
             foreach (var entry in entries.OrderByDescending(entry => entry.Count).ThenBy(entry => entry.Track.Title))
-                DataRows.Add(new DashboardDataRow(DataRows.Count + 1, entry.Track.Title, EmptyAsUnknown(entry.Track.Artist, "Unknown artist"), EmptyAsUnknown(entry.Track.Album, "Unknown album"), $"{entry.Count:N0}", AlbumArtResolver.For(entry.Track)));
+                DataRows.Add(new DashboardDataRow(DataRows.Count + 1, entry.Track.Title, EmptyAsUnknown(entry.Track.Artist, "Unknown artist"), EmptyAsUnknown(entry.Track.Album, "Unknown album"), $"{entry.Count:N0}", AlbumArtResolver.For(entry.Track), new WmpOpenTarget(WmpOpenKind.Track, entry.Track.SourceUrl, entry.Track.Title)));
             return;
         }
 
@@ -271,14 +645,14 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
             foreach (var group in entries.GroupBy(entry => EmptyAsUnknown(entry.Track.Album, "Unknown album"))
                          .Select(group => new { Name = group.Key, Count = group.Sum(entry => entry.Count), TrackCount = group.Count(), First = group.First().Track })
                          .OrderByDescending(group => group.Count).ThenBy(group => group.Name))
-                DataRows.Add(new DashboardDataRow(DataRows.Count + 1, group.Name, EmptyAsUnknown(group.First.Artist, "Unknown artist"), $"{group.TrackCount:N0} tracks", $"{group.Count:N0}", AlbumArtResolver.For(group.First)));
+                DataRows.Add(new DashboardDataRow(DataRows.Count + 1, group.Name, EmptyAsUnknown(group.First.Artist, "Unknown artist"), $"{group.TrackCount:N0} tracks", $"{group.Count:N0}", AlbumArtResolver.For(group.First), new WmpOpenTarget(WmpOpenKind.Album, group.First.SourceUrl, group.Name)));
             return;
         }
 
         foreach (var group in entries.GroupBy(entry => EmptyAsUnknown(entry.Track.Artist, "Unknown artist"))
                      .Select(group => new { Name = group.Key, Count = group.Sum(entry => entry.Count), First = group.First().Track })
                      .OrderByDescending(group => group.Count).ThenBy(group => group.Name))
-            DataRows.Add(new DashboardDataRow(DataRows.Count + 1, group.Name, EmptyAsUnknown(group.First.Album, "Unknown album"), group.First.Album, $"{group.Count:N0}", AlbumArtResolver.For(group.First)));
+            DataRows.Add(new DashboardDataRow(DataRows.Count + 1, group.Name, EmptyAsUnknown(group.First.Album, "Unknown album"), group.First.Album, $"{group.Count:N0}", AlbumArtResolver.For(group.First), new WmpOpenTarget(WmpOpenKind.Artist, group.First.SourceUrl, group.Name)));
     }
 
     private IReadOnlyList<TrackTally> GetPeriodTracks(IReadOnlyList<LibrarySnapshot> snapshots, out string caption, out string emptyMessage, out string metricPeriodCaption)
@@ -292,38 +666,76 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
         }
 
         var latest = snapshots[^1];
+        var baseline = snapshots[0];
         if (SelectedPeriod == "All time")
         {
-            caption = "Current cumulative WMP play counts";
-            emptyMessage = "No audio tracks found in the latest snapshot";
-            metricPeriodCaption = "All time";
-            return latest.Tracks.Where(track => track.PlayCount > 0).Select(track => new TrackTally(track, track.PlayCount)).ToArray();
-        }
+            caption = FormatDataRange(baseline.CapturedAtUtc, latest.CapturedAtUtc);
+            metricPeriodCaption = caption;
+            if (IncludeBaselineSnapshot)
+            {
+                emptyMessage = "No audio tracks found in the latest snapshot";
+                return latest.Tracks.Where(track => track.PlayCount > 0).Select(track => new TrackTally(track, track.PlayCount)).ToArray();
+            }
 
-        if (snapshots.Count < 2)
-        {
-            caption = "Needs a second snapshot";
-            emptyMessage = "Capture one more snapshot to calculate new listens";
-            metricPeriodCaption = SelectedPeriod;
-            return [];
+            if (snapshots.Count < 2)
+            {
+                emptyMessage = "Capture one more snapshot to calculate observed listens";
+                return [];
+            }
+
+            emptyMessage = "No play-count increases observed since the first snapshot";
+            return ToTallies(Reporting.Compare(baseline, latest));
         }
 
         var span = SelectedPeriod switch { "Past week" => TimeSpan.FromDays(7), "Past month" => TimeSpan.FromDays(31), "Past year" => TimeSpan.FromDays(365), _ => TimeSpan.Zero };
+        var comparisonStart = latest.CapturedAtUtc - span;
+        caption = FormatDataRange(comparisonStart, latest.CapturedAtUtc);
+        metricPeriodCaption = caption;
+        var includesBaselineDate = comparisonStart <= baseline.CapturedAtUtc;
+
+        if (snapshots.Count < 2)
+        {
+            if (IncludeBaselineSnapshot && includesBaselineDate)
+            {
+                emptyMessage = "No audio tracks found in the first snapshot";
+                return BaselineTallies(baseline);
+            }
+
+            emptyMessage = "Capture one more snapshot to calculate new listens";
+            return [];
+        }
+
         var start = snapshots.LastOrDefault(snapshot => snapshot.CapturedAtUtc <= latest.CapturedAtUtc - span);
         if (start is null)
         {
-            start = snapshots[0];
-            var baseline = ToEastern(start.CapturedAtUtc);
-            caption = $"Observed since {baseline:MMM d h:mm tt}";
+            start = baseline;
             emptyMessage = "No play-count increases observed since the first snapshot";
-            metricPeriodCaption = $"Since {baseline:MMM d}";
-            return Reporting.Compare(start, latest).Rows.Where(row => row.Listens > 0).Select(row => new TrackTally(row.Track, row.Listens)).ToArray();
+            var observed = ToTallies(Reporting.Compare(start, latest));
+            return IncludeBaselineSnapshot && includesBaselineDate ? IncludeBaselineTallies(baseline, observed) : observed;
         }
 
-        caption = $"Observed from {ToEastern(start.CapturedAtUtc):MMM d} to {ToEastern(latest.CapturedAtUtc):MMM d}";
         emptyMessage = "No play-count increases observed in this period";
-        metricPeriodCaption = SelectedPeriod;
-        return Reporting.Compare(start, latest).Rows.Where(row => row.Listens > 0).Select(row => new TrackTally(row.Track, row.Listens)).ToArray();
+        var entries = ToTallies(Reporting.Compare(start, latest));
+        return IncludeBaselineSnapshot && includesBaselineDate ? IncludeBaselineTallies(baseline, entries) : entries;
+    }
+
+    private static IReadOnlyList<TrackTally> BaselineTallies(LibrarySnapshot baseline) =>
+        baseline.Tracks.Where(track => track.PlayCount > 0).Select(track => new TrackTally(track, track.PlayCount)).ToArray();
+
+    private static IReadOnlyList<TrackTally> ToTallies(PeriodReport report) =>
+        report.Rows.Where(row => row.Listens > 0).Select(row => new TrackTally(row.Track, row.Listens)).ToArray();
+
+    private static IReadOnlyList<TrackTally> IncludeBaselineTallies(LibrarySnapshot baseline, IReadOnlyList<TrackTally> observed)
+    {
+        var totals = BaselineTallies(baseline).ToDictionary(entry => entry.Track.Id, StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in observed)
+        {
+            if (totals.TryGetValue(entry.Track.Id, out var existing))
+                totals[entry.Track.Id] = new TrackTally(entry.Track, existing.Count + entry.Count);
+            else
+                totals[entry.Track.Id] = entry;
+        }
+        return totals.Values.ToArray();
     }
 
     private void RefreshSchedulerState()
@@ -352,8 +764,102 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
         SchedulerState = disabled ? "Automatic snapshots disabled" : "No automatic snapshot task found";
     }
 
+    private void ShowSnapshotStatus()
+    {
+        try
+        {
+            MessageBox.Show(SnapshotStatus.Describe(_store.LoadAll()), "Snapshot status", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch
+        {
+            MessageBox.Show("The local snapshot history could not be read", "Snapshot status", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private async Task CheckForUpdatesAsync()
+    {
+        _isCheckingForUpdates = true;
+        OnPropertyChanged(nameof(CanCheckForUpdates));
+        OnPropertyChanged(nameof(UpdateButtonText));
+
+        try
+        {
+            var repositoryUrl = Environment.GetEnvironmentVariable("WMPL_WRAP_REPOSITORY_URL") ?? DefaultRepositoryUrl;
+            var release = await GitHubReleaseChecker.GetLatestAsync(repositoryUrl);
+            var installedVersion = GetType().Assembly.GetName().Version ?? new Version(1, 1, 0);
+
+            if (release is null)
+            {
+                UpdateStatus = "No published GitHub release is available yet";
+                MessageBox.Show("No published GitHub release is available yet.", "Check for updates", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            if (release.Version > installedVersion)
+            {
+                UpdateStatus = $"WMPL Wrap v{release.Version.ToString(3)} is available";
+                var result = MessageBox.Show(
+                    $"WMPL Wrap v{release.Version.ToString(3)} is available.\n\nOpen its GitHub release page?",
+                    "Update available",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Information);
+                if (result == MessageBoxResult.Yes)
+                    Process.Start(new ProcessStartInfo(release.ReleaseUrl) { UseShellExecute = true });
+                return;
+            }
+
+            UpdateStatus = $"WMPL Wrap {AppVersion} is up to date";
+            MessageBox.Show($"WMPL Wrap {AppVersion} is up to date.", "Check for updates", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception error)
+        {
+            UpdateStatus = "Unable to check GitHub for updates";
+            MessageBox.Show($"An update check could not be completed.\n\n{error.Message}", "Check for updates", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        finally
+        {
+            _isCheckingForUpdates = false;
+            OnPropertyChanged(nameof(CanCheckForUpdates));
+            OnPropertyChanged(nameof(UpdateButtonText));
+        }
+    }
+
+    public void OpenInWmp(object? item)
+    {
+        if (!OpenInWmpOnDoubleClick || item is not IOpenInWmpTarget { OpenTarget: { } target }) return;
+        try
+        {
+            WmpLibraryLauncher.Open(target);
+        }
+        catch (Exception error)
+        {
+            MessageBox.Show($"Windows Media Player could not open this item\n\n{error.Message}", "Open in Windows Media Player", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private void SavePreferences() => _settingsStore.Save(new DashboardPreferences(_includeBaselineSnapshot, _openInWmpOnDoubleClick));
+
     private static void OpenScheduler() => Process.Start(new ProcessStartInfo("taskschd.msc") { UseShellExecute = true });
     private static void OpenGitHub() => Process.Start(new ProcessStartInfo(Environment.GetEnvironmentVariable("WMPL_WRAP_REPOSITORY_URL") ?? DefaultRepositoryUrl) { UseShellExecute = true });
+    private static void OpenReleases()
+    {
+        var repositoryUrl = Environment.GetEnvironmentVariable("WMPL_WRAP_REPOSITORY_URL") ?? DefaultRepositoryUrl;
+        Process.Start(new ProcessStartInfo($"{repositoryUrl.TrimEnd('/')}/releases") { UseShellExecute = true });
+    }
+
+    private static string ResolveDataDirectory()
+    {
+        var configured = Environment.GetEnvironmentVariable("WMPL_WRAP_DATA");
+        if (!string.IsNullOrWhiteSpace(configured)) return configured;
+
+        for (var directory = new DirectoryInfo(Environment.CurrentDirectory); directory is not null; directory = directory.Parent)
+        {
+            var candidate = Path.Combine(directory.FullName, "data");
+            if (Directory.Exists(candidate)) return candidate;
+        }
+
+        return Path.Combine(Environment.CurrentDirectory, "data");
+    }
     private static string EmptyAsUnknown(string value, string fallback) => string.IsNullOrWhiteSpace(value) ? fallback : value;
     private static double DurationSeconds(string value) => double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds) ? seconds : 0;
     private static string FormatDuration(double seconds)
@@ -361,21 +867,95 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
         var span = TimeSpan.FromSeconds(seconds);
         return span.TotalHours >= 1 ? $"{(int)span.TotalHours} h {span.Minutes} m" : $"{span.Minutes} m";
     }
+    private static string FormatDataRange(DateTimeOffset startUtc, DateTimeOffset endUtc)
+    {
+        var start = ToEastern(startUtc);
+        var end = ToEastern(endUtc);
+        return start.Year == end.Year
+            ? $"Data from {start:MMM d} to {end:MMM d}"
+            : $"Data from {start:MMM d, yyyy} to {end:MMM d, yyyy}";
+    }
     private void ClearAll() { LatestSnapshotTracks.Clear(); TopTracks.Clear(); TopAlbums.Clear(); TopArtists.Clear(); DataRows.Clear(); TotalListens = "-"; TotalListeningTime = "-"; MetricTopArtist = "-"; MetricTopArtistCount = ""; }
     private static DateTimeOffset ToEastern(DateTimeOffset utc) => TimeZoneInfo.ConvertTimeBySystemTimeZoneId(utc, "Eastern Standard Time");
     private void Set<T>(ref T field, T value, [CallerMemberName] string? property = null) { if (EqualityComparer<T>.Default.Equals(field, value)) return; field = value; OnPropertyChanged(property); }
     private void OnPropertyChanged([CallerMemberName] string? property = null) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(property));
 }
 
-public sealed record DashboardSong(int Rank, string Title, string ArtistAlbum, string CountLabel, ImageSource? Artwork)
+internal static class GitHubReleaseChecker
 {
-    public static DashboardSong From(TrackSnapshot track, string count, int rank) => new(rank, track.Title, string.IsNullOrWhiteSpace(track.Album) ? track.Artist : $"{track.Artist} · {track.Album}", count, AlbumArtResolver.For(track));
+    private static readonly HttpClient Client = CreateClient();
+
+    public static async Task<GitHubRelease?> GetLatestAsync(string repositoryUrl)
+    {
+        if (!Uri.TryCreate(repositoryUrl, UriKind.Absolute, out var repositoryUri) ||
+            !string.Equals(repositoryUri.Host, "github.com", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("The project repository is not a valid GitHub URL.");
+
+        var segments = repositoryUri.AbsolutePath.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length < 2) throw new InvalidOperationException("The project repository could not be identified.");
+
+        var endpoint = $"https://api.github.com/repos/{segments[0]}/{segments[1]}/releases/latest";
+        using var response = await Client.GetAsync(endpoint);
+        if (response.StatusCode == HttpStatusCode.NotFound) return null;
+        response.EnsureSuccessStatusCode();
+
+        var json = await response.Content.ReadAsStringAsync();
+        var payload = JsonSerializer.Deserialize<GitHubReleasePayload>(json);
+        if (payload is null || string.IsNullOrWhiteSpace(payload.TagName) || string.IsNullOrWhiteSpace(payload.HtmlUrl))
+            throw new InvalidOperationException("GitHub returned an incomplete release record.");
+
+        var tag = payload.TagName.Trim().TrimStart('v', 'V');
+        if (!Version.TryParse(tag, out var version))
+            throw new InvalidOperationException($"The latest release tag '{payload.TagName}' is not a supported version number.");
+
+        return new GitHubRelease(version, payload.HtmlUrl);
+    }
+
+    private static HttpClient CreateClient()
+    {
+        var client = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("WMPL-Wrap-Update-Check");
+        client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+        return client;
+    }
+
+    private sealed record GitHubReleasePayload(
+        [property: System.Text.Json.Serialization.JsonPropertyName("tag_name")] string? TagName,
+        [property: System.Text.Json.Serialization.JsonPropertyName("html_url")] string? HtmlUrl);
 }
 
-public sealed record DashboardAggregate(string Title, string Subtitle, string CountLabel, ImageSource? Artwork);
-public sealed record DashboardDataRow(int Rank, string Title, string Subtitle, string Context, string CountLabel, ImageSource? Artwork);
-public sealed record DashboardSnapshotChange(int Rank, string Title, string Artist, string Album, string Duration, string ListensLabel, string TotalCountLabel, ImageSource? Artwork)
+internal sealed record GitHubRelease(Version Version, string ReleaseUrl);
+
+public interface IOpenInWmpTarget
 {
+    WmpOpenTarget OpenTarget { get; }
+}
+
+public sealed record DashboardSong(int Rank, string Title, string ArtistAlbum, string CountLabel, ImageSource? Artwork, WmpOpenTarget OpenTarget) : IOpenInWmpTarget
+{
+    public static DashboardSong From(TrackSnapshot track, string count, int rank) => new(rank, track.Title, string.IsNullOrWhiteSpace(track.Album) ? track.Artist : $"{track.Artist} · {track.Album}", count, AlbumArtResolver.For(track), new WmpOpenTarget(WmpOpenKind.Track, track.SourceUrl, track.Title));
+}
+
+public sealed record DashboardAggregate(string Title, string Subtitle, string CountLabel, ImageSource? Artwork, WmpOpenTarget OpenTarget) : IOpenInWmpTarget;
+public sealed record DashboardDataRow(int Rank, string Title, string Subtitle, string Context, string CountLabel, ImageSource? Artwork, WmpOpenTarget OpenTarget) : IOpenInWmpTarget;
+public sealed record DashboardGraphLegendItem(string Name, Brush Color);
+public sealed record DashboardSnapshotOption(DateTimeOffset CapturedAtUtc, string Label)
+{
+    public override string ToString() => Label;
+}
+public sealed record DashboardSnapshotChange(int Rank, string Title, string Artist, string Album, string Duration, string ListensLabel, string TotalCountLabel, ImageSource? Artwork, WmpOpenTarget OpenTarget) : IOpenInWmpTarget
+{
+    public static DashboardSnapshotChange FromBaseline(TrackSnapshot track, int rank) => new(
+        rank,
+        track.Title,
+        string.IsNullOrWhiteSpace(track.Artist) ? "Unknown artist" : track.Artist,
+        string.IsNullOrWhiteSpace(track.Album) ? "Unknown album" : track.Album,
+        FormatTrackDuration(track.Duration),
+        track.PlayCount.ToString("N0", CultureInfo.CurrentCulture),
+        track.PlayCount.ToString("N0", CultureInfo.CurrentCulture),
+        AlbumArtResolver.For(track),
+        new WmpOpenTarget(WmpOpenKind.Track, track.SourceUrl, track.Title));
+
     public static DashboardSnapshotChange From(TrackSnapshot track, long listens, int rank) => new(
         rank,
         track.Title,
@@ -384,7 +964,8 @@ public sealed record DashboardSnapshotChange(int Rank, string Title, string Arti
         FormatTrackDuration(track.Duration),
         $"+{listens:N0}",
         track.PlayCount.ToString("N0", CultureInfo.CurrentCulture),
-        AlbumArtResolver.For(track));
+        AlbumArtResolver.For(track),
+        new WmpOpenTarget(WmpOpenKind.Track, track.SourceUrl, track.Title));
 
     private static string FormatTrackDuration(string value)
     {
@@ -394,7 +975,36 @@ public sealed record DashboardSnapshotChange(int Rank, string Title, string Arti
     }
 }
 internal sealed record TrackTally(TrackSnapshot Track, long Count);
-internal enum DashboardPage { Overview, LatestSnapshot, Graphs, Data, Settings }
+internal sealed record DashboardPreferences(bool IncludeBaselineSnapshot = true, bool OpenInWmpOnDoubleClick = true);
+
+internal sealed class DashboardSettingsStore(string dataDirectory)
+{
+    private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
+    private readonly string _path = Path.Combine(Path.GetFullPath(dataDirectory), "desktop-settings.json");
+
+    public DashboardPreferences Load()
+    {
+        try
+        {
+            return File.Exists(_path)
+                ? JsonSerializer.Deserialize<DashboardPreferences>(File.ReadAllText(_path), Json) ?? new DashboardPreferences()
+                : new DashboardPreferences();
+        }
+        catch { return new DashboardPreferences(); }
+    }
+
+    public void Save(DashboardPreferences preferences)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
+            File.WriteAllText(_path, JsonSerializer.Serialize(preferences, Json));
+        }
+        catch { /* Preferences are non-essential and stay active for this session */ }
+    }
+}
+
+internal enum DashboardPage { Overview, Graphs, Data, LatestSnapshot, Settings }
 internal enum DataView { Tracks, Albums, Artists }
 
 internal sealed class RelayCommand(Action<object?> execute) : ICommand

@@ -1,62 +1,101 @@
-# WMPL Wrap: Snapshot logger
+# WMPL Wrap
 
-### Basically Spotify Wrap / YouTube Music Recap, but for Windows Media Player Legacy!
+**A local listening-history companion for Windows Media Player Legacy**
 
-------
+**Current version:** `v1.1.0` · [Releases](https://github.com/zaynedoc/WMPL-Wrap/releases) · [Privacy](PRIVACY.md) · [MIT License](LICENSE)
 
-WMPL does not expose a play history; it exposes a cumulative `UserPlayCount` for
-each library item. This project turns those cumulative values into period listens
-by taking read-only snapshots of the Windows Media Player library.
+WMPL Wrap turns Windows Media Player's cumulative play counts into a personal
+listening history. It captures local snapshots, compares them over time, and presents
+your top songs, albums, artists, and latest listening changes in a native Windows app.
 
-The first snapshot is a **baseline**, not a recap, due to a lack of timestampping.
-Every sequential report thereafter compares the same track in two snapshots:
+## What it does
 
-```
+- Captures read-only snapshots of the local Windows Media Player Legacy library
+- Calculates listens from play-count increases between snapshots
+- Matches recurring tracks by local source URL, so tag edits keep their history
+- Shows overview, snapshot history, top-song, top-album, and top-artist views
+- Can schedule one daily local snapshot through Windows Task Scheduler
+- Lets users manually check GitHub Releases for a newer signed version
+
+## How the history works
+
+Windows Media Player does not keep a dated play history; it exposes a cumulative
+`UserPlayCount` for each library item. Your first snapshot establishes a local
+baseline. Each later report compares two snapshots:
+
+```text
 listens in a period = max(0, end.UserPlayCount - start.UserPlayCount)
 ```
 
-##### Note: The `max` is deliberate. If WMP or its library is reset and a counter gets smaller, treating the difference as new listens would invent data. The report instead flags the counter reset.
+WMPL Wrap can optionally include the first snapshot's existing counts ("baseline") in reports that
+include the baseline date. This makes a new installation useful immediately, while
+clearly treating those counts as baseline data rather than retroactively dated listens.
 
-This is important, as you may notice that "Last week/month/year" option on the
-desktop app will not be inclusive of your baseline snapshot data, only data after.
+## Data recording
 
-## What is recorded
+Snapshots are JSON files in `data/snapshots` (or the directory provided with `--data`).
+Each one stores its capture time, the WMP total count, and the metadata needed to label
+results:
 
-Snapshots are JSON files in `data/snapshots` (or the directory supplied by
-`--data`). They contain a timestamp, the WMP total count, and just enough
-metadata to label a result: source URL, title, artist, album, and duration.
-The scanner reads WMP through its COM library API; it never writes media tags,
-play counts, or the WMP library.
+- Source URL
+- Title
+- Artist
+- Album
+- Duration
 
-Tracks that first appear after the start snapshot are omitted from that period's
-totals. Their pre-existing WMP count cannot be reliably assigned to the period;
-they start contributing once a later snapshot establishes their baseline.
+The `data` directory is ignored by Git. Artwork is read locally—from WMP artwork
+references, nearby cover files, or embedded artwork—and is never looked up online.
+See [PRIVACY.md](PRIVACY.md) for the full local-data notice.
 
-## Desktop app
+## Run the desktop app
 
-The native WPF desktop app is separate from the PowerShell/CLI workflow:
+### Development
+
+Requires the .NET 10 SDK and Windows Media Player Legacy. Verify the build by running:
 
 ```powershell
 dotnet run --project src/WmplWrap.Desktop
 ```
 
-It provides a Windows 7-inspired library view with the latest observed play-count
-changes and a Top 5 selector for all time, the past week, month, or year. The
-selector stays selected for the life of the app session. All-time shows WMP's
-current cumulative counts; date ranges use only observed snapshot deltas and
-therefore remain empty until enough baseline history exists.
+### Standalone build
 
-Artwork is read locally only: first from WMP's saved `WM/AlbumCoverURL` when it
-is a local file, then from common cover files beside the source track (such as
-`Folder.jpg` or `cover.jpg`), then from embedded audio-file artwork. The app
-never looks artwork up online and never writes into the Music folder. Use the
-**Capture snapshot** button to create a new local snapshot; otherwise opening
-the app is read-only.
+Create a self-contained, single-file desktop build:
 
-## Terminal
+```powershell
+.\scripts\publish-desktop.ps1
+```
 
-Requires the .NET 10 SDK or runtime and Windows Media Player's legacy COM
-library. From this directory:
+The result is `publish\desktop\WmplWrap.Desktop.exe`. It does not need VS Code,
+PowerShell, or a separately installed .NET runtime. An unsigned build is useful for
+local packaging checks; however Windows security features can block it from launching.
+
+### Signed public release
+
+The public release workflow publishes, signs, timestamps, and verifies the final EXE in
+one command. The signing certificate's private key stays in Azure; it is never stored in
+this repository.
+
+```powershell
+winget install -e --id Microsoft.Azure.ArtifactSigningClientTools
+.\scripts\publish-desktop.ps1 -Sign
+```
+
+The first signed release can open a browser for Azure authentication. The default profile
+is `wmplwrapdesktop` / `wmplwrapdesktop-public` in East US.
+
+Fork maintainers can use their own Azure Artifact Signing account and profile:
+
+```powershell
+.\scripts\publish-desktop.ps1 -Sign `
+  -CodeSigningAccountName "myappsigning" `
+  -CertificateProfileName "myapp-public" `
+  -Endpoint "https://cus.codesigning.azure.net"
+```
+
+## Snapshot logger commands
+
+The command-line logger requires the .NET 10 SDK or runtime and Windows Media Player's
+legacy COM library. Run these from the repository root:
 
 ```powershell
 dotnet run --project src/WmplWrap -- snapshot
@@ -64,39 +103,35 @@ dotnet run --project src/WmplWrap -- status
 dotnet run --project src/WmplWrap -- report --from 2026-09-01 --to 2026-09-30 --top 20
 ```
 
-`--from` and `--to` accept `yyyy-MM-dd` (Eastern calendar dates) or an ISO-8601
-timestamp. A date range is inclusive at both ends. The result prints the actual
-snapshot timestamps used, so it never implies precision the data does not have.
+`snapshot` is safe to run more than once per day. `status` reports the first and latest
+local snapshot. `--from` and `--to` accept Eastern calendar dates (`yyyy-MM-dd`) or
+ISO-8601 timestamps; ranges are inclusive and the report prints the snapshots it used.
 
-For a quick end-of-day scan before a demo, run `snapshot` again. Multiple
-snapshots in a day are safe.
+## Automatic daily snapshots
 
-For automatic snapshots, from project folder, publish a release:
+First publish the command-line logger. This replaces the local publish output; it does
+not create duplicate scheduled tasks.
 
 ```powershell
 dotnet publish src/WmplWrap -c Release -o publish
-```
-
-Then review and run:
-```powershell
 .\scripts\setup-scheduled-snapshot.ps1 -PublishDirectory .\publish
 ```
-It creates one Windows Task Scheduler task at 12:05 AM in the computer's local time.
-On an Eastern-time PC that means Eastern time and tracks daylight saving time. 
-It also uses `StartWhenAvailable`, so a missed midnight run is caught up after the 
-next sign-in/startup. The script is not run by this project automatically.
 
-To opt out without deleting previous records:
+The setup script creates one local task, **WMPL Wrap Daily Snapshot**, scheduled for
+12:05 AM. `StartWhenAvailable` lets Windows catch up after the next sign-in or startup
+if the PC was off at midnight.
+
+To stop automatic snapshots without deleting recorded history:
+
 ```powershell
 Unregister-ScheduledTask -TaskName "WMPL Wrap Daily Snapshot" -Confirm:$false
 ```
 
-## Notes
+## Project notes
 
-- The first baseline needs a few days of collection before a meaningful recent
-  recap exists.
-- Cumulative counts before the first baseline cannot be dated retroactively.
-- WMP documents `UserPlayCount` (also called `PlayCount`) as a library-only
-  value. Its library `getAll()` API is used to enumerate items. See Microsoft:
+- Cumulative counts from before the first snapshot cannot be timestamped retroactively.
+- More snapshots create a more useful history; daily collection is a good default.
+- Windows Media Player documents `UserPlayCount` (also called `PlayCount`) as a
+  library-only value. WMPL Wrap uses its `getAll()` API to enumerate items. See
   [UserPlayCount](https://learn.microsoft.com/en-us/previous-versions/windows/desktop/wmp/userplaycount-attribute)
   and [getAll](https://learn.microsoft.com/en-us/previous-versions/windows/desktop/wmp/wmplibiwmpmediacollection-iwmpmediacollection-getall--vb-and-c).

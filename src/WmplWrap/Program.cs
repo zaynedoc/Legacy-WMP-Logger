@@ -42,10 +42,7 @@ internal static class Program
 
     private static int Status(SnapshotStore store)
     {
-        var snapshots = store.LoadAll();
-        Console.WriteLine(snapshots.Count == 0
-            ? "No snapshots yet. Run: snapshot"
-            : $"{snapshots.Count:N0} snapshot(s); first: {snapshots[0].CapturedAtUtc:u}; latest: {snapshots[^1].CapturedAtUtc:u}");
+        Console.WriteLine(SnapshotStatus.Describe(store.LoadAll()));
         return 0;
     }
 
