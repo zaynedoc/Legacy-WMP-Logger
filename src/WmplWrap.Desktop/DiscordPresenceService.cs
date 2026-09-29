@@ -2,12 +2,15 @@ using DiscordRPC;
 
 namespace WmplWrap.Desktop;
 
+internal enum DiscordRpcConnectionState { Inactive, Connecting, Active }
+
 internal sealed record DiscordRpcStatus(
     string Summary,
     string NowPlaying,
     string Artwork,
     string LastError,
-    DateTimeOffset? LastUpdatedAtUtc);
+    DateTimeOffset? LastUpdatedAtUtc,
+    DiscordRpcConnectionState ConnectionState);
 
 /// <summary>
 /// Owns the local Discord IPC connection and polling loop. It never contacts a Wrap service.
@@ -26,6 +29,7 @@ internal sealed class DiscordPresenceService : IDisposable
     private DiscordPresenceHandoffBuffer _handoffBuffer = new();
     private DiscordPresencePayload? _lastPayload;
     private WmpPlaybackSnapshot? _currentPlayback;
+    private DiscordRpcConnectionState _connectionState = DiscordRpcConnectionState.Inactive;
     private bool _disposed;
 
     public event Action<DiscordRpcStatus>? StatusChanged;
@@ -40,24 +44,35 @@ internal sealed class DiscordPresenceService : IDisposable
         _handoffBuffer = new DiscordPresenceHandoffBuffer();
         _lastPayload = null;
         _cancellation = new CancellationTokenSource();
+        SetConnectionState(DiscordRpcConnectionState.Connecting);
+        PublishStatus("Connecting to Discord...", "", "", "", null);
 
         try
         {
-            var client = new DiscordRpcClient(preferences.ApplicationId);
-            var initialized = client.Initialize();
+            var client = new DiscordRpcClient(preferences.ApplicationId, -1, null, true, null);
+            client.OnConnectionEstablished += (_, _) => UpdateConnectionState(client, DiscordRpcConnectionState.Connecting, "Discord IPC connected; waiting for ready confirmation", "");
+            client.OnReady += (_, _) => UpdateConnectionState(client, DiscordRpcConnectionState.Active, "Discord connected; waiting for Windows Media Player playback", "");
+            client.OnConnectionFailed += (_, _) => UpdateConnectionState(client, DiscordRpcConnectionState.Inactive, "Discord desktop is unavailable; start Discord and reconnect", "");
+            client.OnClose += (_, _) => UpdateConnectionState(client, DiscordRpcConnectionState.Inactive, "Discord connection was closed; reconnect after Discord is available", "");
             _client = client;
-            Publish(initialized
-                ? new DiscordRpcStatus("Discord connected; waiting for Windows Media Player playback", "", "", "", null)
-                : new DiscordRpcStatus("Discord desktop is unavailable; start Discord and reconnect", "", "", "", null));
+            var initialized = client.Initialize();
 
             if (initialized)
                 _monitor = Task.Run(() => MonitorAsync(_cancellation.Token));
+            else
+            {
+                _client = null;
+                client.Dispose();
+                SetConnectionState(DiscordRpcConnectionState.Inactive);
+                PublishStatus("Discord desktop is unavailable; start Discord and reconnect", "", "", "", null);
+            }
         }
         catch (Exception error)
         {
             _client?.Dispose();
             _client = null;
-            Publish(new DiscordRpcStatus("Discord Rich Presence could not start", "", "", FriendlyError(error), null));
+            SetConnectionState(DiscordRpcConnectionState.Inactive);
+            PublishStatus("Discord Rich Presence could not start", "", "", FriendlyError(error), null);
         }
     }
 
@@ -65,7 +80,7 @@ internal sealed class DiscordPresenceService : IDisposable
     {
         if (_client is null)
         {
-            Publish(new DiscordRpcStatus("Discord Rich Presence is not connected", "", "", "Use Save & reconnect after Discord is running.", null));
+            PublishStatus("Discord Rich Presence is not connected", "", "", "Use Save & reconnect after Discord is running.", null);
             return;
         }
 
@@ -104,6 +119,18 @@ internal sealed class DiscordPresenceService : IDisposable
         if (!await _tickGate.WaitAsync(0, cancellationToken)) return;
         try
         {
+            var connectionState = ConnectionState;
+            if (connectionState != DiscordRpcConnectionState.Active)
+            {
+                PublishStatus(
+                    connectionState == DiscordRpcConnectionState.Connecting ? "Connecting to Discord..." : "Discord desktop is unavailable; start Discord and reconnect",
+                    "",
+                    "",
+                    "",
+                    null);
+                return;
+            }
+
             var playback = await _playbackBridge.ReadAsync(cancellationToken);
             playback = _stateTracker.Observe(playback, _preferences.DetectStalledPlayback);
             lock (_gate) _currentPlayback = playback.HasMedia ? playback : null;
@@ -114,12 +141,12 @@ internal sealed class DiscordPresenceService : IDisposable
                 if (_lastPayload is { } lastPayload &&
                     _handoffBuffer.ShouldKeepLastPresence(playback, _preferences.KeepPresenceBetweenTracks, now))
                 {
-                    Publish(new DiscordRpcStatus(
+                    PublishStatus(
                         "Holding the last Discord status while Windows Media Player changes tracks",
                         $"{lastPayload.Details} \u2014 {lastPayload.State}",
                         "Will clear after 5 seconds without playback",
                         "",
-                        null));
+                        null);
                     return;
                 }
 
@@ -129,12 +156,12 @@ internal sealed class DiscordPresenceService : IDisposable
                 var summary = string.IsNullOrWhiteSpace(bridgeError)
                     ? "Waiting for Windows Media Player playback"
                     : "Windows Media Player could not be read";
-                Publish(new DiscordRpcStatus(
+                PublishStatus(
                     summary,
                     "",
                     $"Fallback asset: wmp_empty\n{_playbackBridge.ConnectionState}",
                     bridgeError,
-                    null));
+                    null);
                 return;
             }
 
@@ -163,17 +190,18 @@ internal sealed class DiscordPresenceService : IDisposable
                 _lastPayload = payload;
             }
 
-            Publish(new DiscordRpcStatus(
+            PublishStatus(
                 "Discord Rich Presence is active",
                 $"{payload.Details} — {payload.State}",
                 payload.UsesFallbackArtwork ? "Using fallback Discord asset: wmp_empty" : $"Using Discord asset: {payload.LargeImageKey}",
                 "",
-                now));
+                now);
         }
         catch (OperationCanceledException) { }
         catch (Exception error)
         {
-            Publish(new DiscordRpcStatus("Discord Rich Presence update failed", "", "", FriendlyError(error), null));
+            SetConnectionState(DiscordRpcConnectionState.Inactive);
+            PublishStatus("Discord Rich Presence update failed", "", "", FriendlyError(error), null);
         }
         finally
         {
@@ -188,16 +216,18 @@ internal sealed class DiscordPresenceService : IDisposable
         cancellation?.Dispose();
         _monitor = null;
         ClearPresence();
-        _client?.Dispose();
+        var client = _client;
         _client = null;
+        client?.Dispose();
         _playbackBridge.Disconnect();
         _stateTracker.Reset();
         _elapsedClock.Reset();
         _handoffBuffer.Reset();
         _lastPayload = null;
         lock (_gate) _currentPlayback = null;
+        SetConnectionState(DiscordRpcConnectionState.Inactive);
         if (publishDisabled)
-            Publish(new DiscordRpcStatus("Discord Rich Presence is disabled", "", "", "", null));
+            PublishStatus("Discord Rich Presence is disabled", "", "", "", null);
     }
 
     private void ClearPresence()
@@ -208,6 +238,29 @@ internal sealed class DiscordPresenceService : IDisposable
         _lastPayload = null;
     }
 
-    private void Publish(DiscordRpcStatus status) => StatusChanged?.Invoke(status);
+    private DiscordRpcConnectionState ConnectionState { get { lock (_gate) return _connectionState; } }
+
+    private void UpdateConnectionState(
+        DiscordRpcClient client,
+        DiscordRpcConnectionState state,
+        string summary,
+        string error)
+    {
+        lock (_gate)
+        {
+            if (!ReferenceEquals(_client, client)) return;
+            _connectionState = state;
+        }
+        PublishStatus(summary, "", "", error, null);
+    }
+
+    private void SetConnectionState(DiscordRpcConnectionState state)
+    {
+        lock (_gate) _connectionState = state;
+    }
+
+    private void PublishStatus(string summary, string nowPlaying, string artwork, string lastError, DateTimeOffset? lastUpdatedAtUtc) =>
+        StatusChanged?.Invoke(new DiscordRpcStatus(summary, nowPlaying, artwork, lastError, lastUpdatedAtUtc, ConnectionState));
+
     private static string FriendlyError(Exception error) => string.IsNullOrWhiteSpace(error.Message) ? error.GetType().Name : error.Message;
 }

@@ -6,6 +6,7 @@ using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Input;
@@ -39,12 +40,15 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
     private bool _discordRpcEnabled;
     private bool _detectStalledPlayback = true;
     private bool _keepDiscordPresenceBetweenTracks = true;
+    private bool _keepDiscordPresenceRunningWhenClosed;
+    private AutomaticSnapshotTaskState _automaticSnapshotTaskState = AutomaticSnapshotTaskState.Unavailable;
     private string _discordApplicationId = DiscordRpcPreferences.DefaultApplicationId;
     private string _discordStatus = "Discord Rich Presence is disabled";
     private string _discordNowPlaying = "No status is being shared";
     private string _discordArtworkStatus = "Fallback asset: wmp_empty";
     private string _discordLastError = "";
     private string _discordLastUpdated = "";
+    private DiscordRpcConnectionState _discordRpcConnectionState = DiscordRpcConnectionState.Inactive;
     private DiscordAlbumArtMapping? _selectedAlbumArtMapping;
     private string _albumArtArtist = "";
     private string _albumArtTitle = "";
@@ -93,6 +97,7 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
         _discordRpcEnabled = discord.Enabled;
         _detectStalledPlayback = discord.DetectStalledPlayback;
         _keepDiscordPresenceBetweenTracks = discord.KeepPresenceBetweenTracks;
+        _keepDiscordPresenceRunningWhenClosed = discord.KeepRunningWhenClosed;
         _discordApplicationId = string.IsNullOrWhiteSpace(discord.ApplicationId) ? DiscordRpcPreferences.DefaultApplicationId : discord.ApplicationId;
         foreach (var mapping in discord.Mappings) AlbumArtMappings.Add(mapping);
         _albumArtPreview = AlbumArtResolver.DiscordFallback();
@@ -104,7 +109,7 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
         BackCommand = new RelayCommand(_ => MovePage(-1));
         ForwardCommand = new RelayCommand(_ => MovePage(1));
         OpenSchedulerCommand = new RelayCommand(_ => OpenScheduler());
-        DisableSchedulerCommand = new AsyncRelayCommand(DisableSchedulerAsync, () => true);
+        ToggleSchedulerCommand = new AsyncRelayCommand(ToggleSchedulerAsync, () => true);
         ShowSnapshotStatusCommand = new RelayCommand(_ => ShowSnapshotStatus());
         OpenGitHubCommand = new RelayCommand(_ => OpenGitHub());
         OpenReleasesCommand = new RelayCommand(_ => OpenReleases());
@@ -114,6 +119,7 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
         ReconnectDiscordCommand = new RelayCommand(_ => ReconnectDiscord());
         OpenDiscordDeveloperPortalCommand = new RelayCommand(_ => OpenDiscordDeveloperPortal());
         OpenAlbumArtCommand = new RelayCommand(_ => Navigate("AlbumArt"));
+        OpenDiscordSettingsCommand = new RelayCommand(_ => OpenDiscordSettings());
         SaveAlbumArtMappingCommand = new RelayCommand(_ => SaveAlbumArtMapping());
         DeleteAlbumArtMappingCommand = new RelayCommand(_ => DeleteAlbumArtMapping());
         UseCurrentTrackForAlbumArtCommand = new RelayCommand(_ => UseCurrentTrackForAlbumArt());
@@ -123,6 +129,7 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
+    public event Action? DiscordSettingsRequested;
     public ObservableCollection<DashboardSnapshotChange> LatestSnapshotTracks { get; } = [];
     public ObservableCollection<DashboardSnapshotOption> SnapshotOptions { get; } = [];
     public ObservableCollection<DashboardSong> TopTracks { get; } = [];
@@ -144,7 +151,7 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
     public ICommand BackCommand { get; }
     public ICommand ForwardCommand { get; }
     public ICommand OpenSchedulerCommand { get; }
-    public ICommand DisableSchedulerCommand { get; }
+    public ICommand ToggleSchedulerCommand { get; }
     public ICommand ShowSnapshotStatusCommand { get; }
     public ICommand OpenGitHubCommand { get; }
     public ICommand OpenReleasesCommand { get; }
@@ -154,11 +161,12 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
     public ICommand ReconnectDiscordCommand { get; }
     public ICommand OpenDiscordDeveloperPortalCommand { get; }
     public ICommand OpenAlbumArtCommand { get; }
+    public ICommand OpenDiscordSettingsCommand { get; }
     public ICommand SaveAlbumArtMappingCommand { get; }
     public ICommand DeleteAlbumArtMappingCommand { get; }
     public ICommand UseCurrentTrackForAlbumArtCommand { get; }
     public string DataDirectory { get; }
-    public string DataLocationLabel => $"Data: {DataDirectory}";
+    public string DataLocationLabel => $"";
     public string SnapshotSummary { get => _snapshotSummary; private set => Set(ref _snapshotSummary, value); }
     public string LatestSnapshotCaption { get => _latestSnapshotCaption; private set => Set(ref _latestSnapshotCaption, value); }
     public string LatestSnapshotSummary { get => _latestSnapshotSummary; private set => Set(ref _latestSnapshotSummary, value); }
@@ -173,6 +181,13 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
     public string MetricTopArtist { get => _metricTopArtist; private set => Set(ref _metricTopArtist, value); }
     public string MetricTopArtistCount { get => _metricTopArtistCount; private set => Set(ref _metricTopArtistCount, value); }
     public string SchedulerState { get => _schedulerState; private set => Set(ref _schedulerState, value); }
+    public string AutomaticSnapshotsToggleText => _automaticSnapshotTaskState switch
+    {
+        AutomaticSnapshotTaskState.Enabled => "Disable automatic snapshots",
+        AutomaticSnapshotTaskState.Disabled => "Enable automatic snapshots",
+        AutomaticSnapshotTaskState.Missing => "Set up automatic snapshots",
+        _ => "Refresh automatic snapshots"
+    };
     public string UpdateStatus { get => _updateStatus; private set => Set(ref _updateStatus, value); }
     public string GraphSummary { get => _graphSummary; private set => Set(ref _graphSummary, value); }
     public string GraphEmptyMessage { get => _graphEmptyMessage; private set => Set(ref _graphEmptyMessage, value); }
@@ -181,6 +196,13 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
     public string DiscordArtworkStatus { get => _discordArtworkStatus; private set => Set(ref _discordArtworkStatus, value); }
     public string DiscordLastError { get => _discordLastError; private set => Set(ref _discordLastError, value); }
     public string DiscordLastUpdated { get => _discordLastUpdated; private set => Set(ref _discordLastUpdated, value); }
+    public string DiscordFooterStatus => $"Discord RPC Status: {_discordRpcConnectionState switch
+    {
+        DiscordRpcConnectionState.Connecting => "Connecting...",
+        DiscordRpcConnectionState.Active => "Active",
+        _ => "Inactive"
+    }}";
+    public string DiscordFooterToolTip => $"{DiscordStatus}\n{DiscordNowPlaying}\nClick to open Discord Rich Presence settings";
     public ImageSource? AlbumArtPreview { get => _albumArtPreview; private set => Set(ref _albumArtPreview, value); }
     public string AlbumArtPreviewStatus { get => _albumArtPreviewStatus; private set => Set(ref _albumArtPreviewStatus, value); }
     public ISeries[] GraphSeries { get => _graphSeries; private set => Set(ref _graphSeries, value); }
@@ -210,6 +232,7 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
     public Visibility DataVisibility => _page == DashboardPage.Data ? Visibility.Visible : Visibility.Collapsed;
     public Visibility SettingsVisibility => _page == DashboardPage.Settings ? Visibility.Visible : Visibility.Collapsed;
     public bool CanManageAlbumArt => _discordRpcEnabled;
+    public bool ShouldKeepRunningInBackground => _discordRpcEnabled && _keepDiscordPresenceRunningWhenClosed;
     public bool CanGoBack => _page != DashboardPage.Overview;
     public bool CanGoForward => _page is not DashboardPage.Settings and not DashboardPage.AlbumArt;
     public string DataTitle => _dataView switch { DataView.Albums => "Top albums", DataView.Artists => "Top artists", _ => "Top songs" };
@@ -251,6 +274,7 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
             _discordRpcEnabled = value;
             OnPropertyChanged();
             OnPropertyChanged(nameof(CanManageAlbumArt));
+            OnPropertyChanged(nameof(ShouldKeepRunningInBackground));
             SaveDiscordSettings();
         }
     }
@@ -278,6 +302,19 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
             OnPropertyChanged();
             SavePreferences();
             if (_discordRpcEnabled) StartDiscordPresence();
+        }
+    }
+
+    public bool KeepDiscordPresenceRunningWhenClosed
+    {
+        get => _keepDiscordPresenceRunningWhenClosed;
+        set
+        {
+            if (_keepDiscordPresenceRunningWhenClosed == value) return;
+            _keepDiscordPresenceRunningWhenClosed = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(ShouldKeepRunningInBackground));
+            SavePreferences();
         }
     }
 
@@ -454,6 +491,12 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
         OnPropertyChanged(nameof(DataContextColumn));
         if (_page == DashboardPage.Settings) RefreshSchedulerState();
         if (_page == DashboardPage.AlbumArt) RefreshAlbumArtPreview();
+    }
+
+    private void OpenDiscordSettings()
+    {
+        Navigate("Settings");
+        DiscordSettingsRequested?.Invoke();
     }
 
     private void MovePage(int direction)
@@ -877,28 +920,116 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
 
     private void RefreshSchedulerState()
     {
-        try
+        _automaticSnapshotTaskState = ReadAutomaticSnapshotTaskState();
+        SchedulerState = _automaticSnapshotTaskState switch
         {
-            using var process = Process.Start(new ProcessStartInfo("schtasks.exe", $"/Query /TN \"{ScheduledTaskName}\"") { CreateNoWindow = true, UseShellExecute = false });
-            process?.WaitForExit(3000);
-            SchedulerState = process?.ExitCode == 0 ? "Daily snapshots are enabled" : "No automatic snapshot task found";
-        }
-        catch { SchedulerState = "Unable to check automatic snapshots"; }
+            AutomaticSnapshotTaskState.Enabled => "Daily snapshots are enabled",
+            AutomaticSnapshotTaskState.Disabled => "Automatic snapshots are disabled. The scheduled task is kept so you can enable it again.",
+            AutomaticSnapshotTaskState.Missing => "No automatic snapshot task found. Set one up with the command in the README.",
+            _ => "Unable to check automatic snapshots"
+        };
+        OnPropertyChanged(nameof(AutomaticSnapshotsToggleText));
     }
 
-    private async Task DisableSchedulerAsync()
+    private async Task ToggleSchedulerAsync()
     {
-        var disabled = await Task.Run(() =>
+        if (_automaticSnapshotTaskState == AutomaticSnapshotTaskState.Missing)
         {
-            try
-            {
-                using var process = Process.Start(new ProcessStartInfo("schtasks.exe", $"/Delete /TN \"{ScheduledTaskName}\" /F") { CreateNoWindow = true, UseShellExecute = false });
-                process?.WaitForExit();
-                return process?.ExitCode == 0;
-            }
-            catch { return false; }
-        });
-        SchedulerState = disabled ? "Automatic snapshots disabled" : "No automatic snapshot task found";
+            SchedulerState = "No automatic snapshot task found. Use the README setup command to create one first.";
+            return;
+        }
+
+        if (_automaticSnapshotTaskState == AutomaticSnapshotTaskState.Unavailable)
+        {
+            SchedulerState = "Automatic snapshots could not be changed. Open Task Scheduler to check its availability.";
+            return;
+        }
+
+        var enable = _automaticSnapshotTaskState == AutomaticSnapshotTaskState.Disabled;
+        var changed = await Task.Run(() => SetAutomaticSnapshotTaskEnabled(enable));
+        if (!changed)
+        {
+            SchedulerState = "Automatic snapshots could not be changed. Open Task Scheduler to check the task.";
+            return;
+        }
+
+        RefreshSchedulerState();
+    }
+
+    private static AutomaticSnapshotTaskState ReadAutomaticSnapshotTaskState()
+    {
+        object? service = null;
+        object? folder = null;
+        object? task = null;
+        try
+        {
+            var serviceType = Type.GetTypeFromProgID("Schedule.Service");
+            if (serviceType is null) return AutomaticSnapshotTaskState.Unavailable;
+
+            service = Activator.CreateInstance(serviceType);
+            if (service is null) return AutomaticSnapshotTaskState.Unavailable;
+            dynamic scheduler = service;
+            scheduler.Connect();
+            folder = scheduler.GetFolder("\\");
+            dynamic root = folder;
+            task = root.GetTask(ScheduledTaskName);
+            dynamic registeredTask = task;
+            return Convert.ToBoolean(registeredTask.Enabled, CultureInfo.InvariantCulture)
+                ? AutomaticSnapshotTaskState.Enabled
+                : AutomaticSnapshotTaskState.Disabled;
+        }
+        catch (COMException error) when ((uint)error.HResult == 0x80070002)
+        {
+            return AutomaticSnapshotTaskState.Missing;
+        }
+        catch
+        {
+            return AutomaticSnapshotTaskState.Unavailable;
+        }
+        finally
+        {
+            ReleaseComObject(task);
+            ReleaseComObject(folder);
+            ReleaseComObject(service);
+        }
+    }
+
+    private static bool SetAutomaticSnapshotTaskEnabled(bool enabled)
+    {
+        object? service = null;
+        object? folder = null;
+        object? task = null;
+        try
+        {
+            var serviceType = Type.GetTypeFromProgID("Schedule.Service");
+            if (serviceType is null) return false;
+
+            service = Activator.CreateInstance(serviceType);
+            if (service is null) return false;
+            dynamic scheduler = service;
+            scheduler.Connect();
+            folder = scheduler.GetFolder("\\");
+            dynamic root = folder;
+            task = root.GetTask(ScheduledTaskName);
+            dynamic registeredTask = task;
+            registeredTask.Enabled = enabled;
+            return Convert.ToBoolean(registeredTask.Enabled, CultureInfo.InvariantCulture) == enabled;
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            ReleaseComObject(task);
+            ReleaseComObject(folder);
+            ReleaseComObject(service);
+        }
+    }
+
+    private static void ReleaseComObject(object? value)
+    {
+        if (value is not null && Marshal.IsComObject(value)) Marshal.FinalReleaseComObject(value);
     }
 
     private void ShowSnapshotStatus()
@@ -1111,6 +1242,9 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
             DiscordArtworkStatus = string.IsNullOrWhiteSpace(status.Artwork) ? "Fallback asset: wmp_empty" : status.Artwork;
             DiscordLastError = status.LastError;
             DiscordLastUpdated = status.LastUpdatedAtUtc is { } updated ? $"Last update {ToEastern(updated):h:mm:ss tt}" : "";
+            _discordRpcConnectionState = status.ConnectionState;
+            OnPropertyChanged(nameof(DiscordFooterStatus));
+            OnPropertyChanged(nameof(DiscordFooterToolTip));
             RefreshAlbumArtPreview();
         }
 
@@ -1124,7 +1258,8 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
         _discordApplicationId.Trim(),
         _detectStalledPlayback,
         AlbumArtMappings.ToArray(),
-        _keepDiscordPresenceBetweenTracks);
+        _keepDiscordPresenceBetweenTracks,
+        _keepDiscordPresenceRunningWhenClosed);
 
     private bool TryNormalizeDiscordApplicationId(out string applicationId)
     {
@@ -1326,6 +1461,7 @@ internal sealed class DashboardSettingsStore(string dataDirectory)
 
 internal enum DashboardPage { Overview, Graphs, Data, LatestSnapshot, Settings, AlbumArt }
 internal enum DataView { Tracks, Albums, Artists }
+internal enum AutomaticSnapshotTaskState { Unavailable, Missing, Enabled, Disabled }
 
 internal sealed class RelayCommand(Action<object?> execute) : ICommand
 {

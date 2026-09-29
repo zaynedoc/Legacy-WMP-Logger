@@ -23,6 +23,7 @@ var defaults = new DiscordRpcPreferences();
 Assert(!defaults.Enabled, "Discord Rich Presence must default to disabled.");
 Assert(defaults.ApplicationId == "1553580075688009838", "The shared Discord Application ID must be the default.");
 Assert(defaults.KeepPresenceBetweenTracks, "Discord Rich Presence must keep a last track during short WMP handoffs by default.");
+Assert(!defaults.KeepRunningWhenClosed, "Discord Rich Presence must not keep Wrap running after close by default.");
 
 var playing = new WmpPlaybackSnapshot("Song", "Artist", "Album", "Album Artist", "file:///song.mp3", "03:00", 10, WmpPlaybackState.Playing);
 var mapping = new DiscordAlbumArtMapping(" album artist ", " ALBUM ", "album_cover");
@@ -62,10 +63,10 @@ var settingsDirectory = Path.Combine(Path.GetTempPath(), "WMPL-Wrap-Tests", Guid
 try
 {
     var settingsStore = new DashboardSettingsStore(settingsDirectory);
-    var savedPreferences = new DashboardPreferences(false, false, new DiscordRpcPreferences(true, "1553580075688009838", false, [mapping], false));
+    var savedPreferences = new DashboardPreferences(false, false, new DiscordRpcPreferences(true, "1553580075688009838", false, [mapping], false, true));
     settingsStore.Save(savedPreferences);
     var loadedPreferences = settingsStore.Load();
-    Assert(loadedPreferences.DiscordRpc is { Enabled: true, DetectStalledPlayback: false, KeepPresenceBetweenTracks: false }, "Discord preferences must persist with existing desktop settings.");
+    Assert(loadedPreferences.DiscordRpc is { Enabled: true, DetectStalledPlayback: false, KeepPresenceBetweenTracks: false, KeepRunningWhenClosed: true }, "Discord preferences must persist with existing desktop settings.");
     Assert(loadedPreferences.DiscordRpc!.Mappings.Single().AssetKey == "album_cover", "Album-art mappings must persist locally.");
 
     File.WriteAllText(Path.Combine(settingsDirectory, "desktop-settings.json"), "{\"IncludeBaselineSnapshot\":false,\"OpenInWmpOnDoubleClick\":false}");
@@ -74,7 +75,7 @@ try
 
     File.WriteAllText(Path.Combine(settingsDirectory, "desktop-settings.json"), "{\"DiscordRpc\":{\"Enabled\":true,\"ApplicationId\":\"1553580075688009838\",\"DetectStalledPlayback\":true,\"AlbumArtMappings\":[]}}");
     var upgradedDiscordPreferences = settingsStore.Load();
-    Assert(upgradedDiscordPreferences.DiscordRpc is { KeepPresenceBetweenTracks: true }, "Existing Discord settings must default to keeping the last track during short handoffs.");
+    Assert(upgradedDiscordPreferences.DiscordRpc is { KeepPresenceBetweenTracks: true, KeepRunningWhenClosed: false }, "Existing Discord settings must preserve handoff behavior and default background mode to off.");
 }
 finally
 {

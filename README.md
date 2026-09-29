@@ -137,7 +137,7 @@ Unregister-ScheduledTask -TaskName "WMPL Wrap Daily Snapshot" -Confirm:$false
   hidden while paused.
 - **Track changes:** Keeps the last activity for up to five seconds during WMP's brief
   no-track handoff. Disable that option in Settings to clear Discord immediately.
-- **Default application:** `1553580075688009838`, named **Windows Media Player**, with
+- **Default application:** `1553580075688009838`, named **WMPL Wrap Rich Presence**, with
   `wmp_icon` and `wmp_empty` uploaded as Rich Presence assets.
 - **Album art:** Use **Settings → Discord Rich Presence → Album art** to map an exact
   album artist and album title to an uploaded Discord asset key. The preview is local;

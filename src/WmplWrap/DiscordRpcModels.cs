@@ -39,7 +39,8 @@ public sealed record DiscordRpcPreferences(
     string ApplicationId = "1553580075688009838",
     bool DetectStalledPlayback = true,
     IReadOnlyList<DiscordAlbumArtMapping>? AlbumArtMappings = null,
-    bool KeepPresenceBetweenTracks = true)
+    bool KeepPresenceBetweenTracks = true,
+    bool KeepRunningWhenClosed = false)
 {
     public const string DefaultApplicationId = "1553580075688009838";
     public IReadOnlyList<DiscordAlbumArtMapping> Mappings => AlbumArtMappings ?? [];
