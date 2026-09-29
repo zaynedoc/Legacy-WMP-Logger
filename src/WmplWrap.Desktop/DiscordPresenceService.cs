@@ -193,7 +193,8 @@ internal sealed class DiscordPresenceService : IDisposable
                     ],
                     Timestamps = payload.ElapsedSinceUtc is { } elapsedSince
                         ? new Timestamps(elapsedSince.UtcDateTime)
-                        : null
+                        // An empty timestamp object tells Discord to clear the prior live timer.
+                        : new Timestamps()
                 });
                 _lastPayload = payload;
             }

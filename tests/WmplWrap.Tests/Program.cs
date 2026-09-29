@@ -46,6 +46,16 @@ var graph = DashboardGraphBuilder.Build([first, second], new DashboardGraphOptio
     6,
     true));
 Assert(graph.Summary.Contains("includes first-seen WMP counts", StringComparison.Ordinal), "Graphs must disclose when first-seen counts are included.");
+
+var navigation = new DashboardNavigationHistory(new DashboardNavigationState(DashboardPage.Overview, DataView.Tracks));
+navigation.Navigate(new DashboardNavigationState(DashboardPage.Graphs, DataView.Tracks));
+navigation.Navigate(new DashboardNavigationState(DashboardPage.Settings, DataView.Tracks));
+navigation.Navigate(new DashboardNavigationState(DashboardPage.Data, DataView.Albums));
+Assert(navigation.TryGoBack(out var backToSettings) && backToSettings.Page == DashboardPage.Settings, "Back must return to the most recently visited page, not the prior enum value.");
+Assert(navigation.TryGoBack(out var backToGraphs) && backToGraphs.Page == DashboardPage.Graphs, "Back must preserve chronological history across multiple visits.");
+Assert(navigation.TryGoForward(out var forwardToSettings) && forwardToSettings.Page == DashboardPage.Settings, "Forward must restore the next page in chronological history.");
+navigation.Navigate(new DashboardNavigationState(DashboardPage.LatestSnapshot, DataView.Tracks));
+Assert(!navigation.CanGoForward, "A new navigation after going back must clear forward history.");
 var defaults = new DiscordRpcPreferences();
 Assert(!defaults.Enabled, "Discord Rich Presence must default to disabled.");
 Assert(defaults.ApplicationId == "1553580075688009838", "The shared Discord Application ID must be the default.");
@@ -60,6 +70,8 @@ Assert(mappedPresence is { Details: "\u201cSong\u201d", State: "by Artist", Larg
 var fallbackPresence = DiscordPresenceFormatter.Create(playing, []);
 Assert(fallbackPresence is { LargeImageKey: "wmp_empty", UsesFallbackArtwork: true }, "Unmapped albums must use the fallback Discord asset.");
 Assert(DiscordPresenceFormatter.Create(WmpPlaybackSnapshot.None, []) is null, "Stopped playback must clear Rich Presence.");
+var pausedPresence = DiscordPresenceFormatter.Create(playing with { State = WmpPlaybackState.Paused, PositionSeconds = 75 }, []);
+Assert(pausedPresence is { State: "by Artist \u00b7 Paused", ElapsedSinceUtc: null }, "Paused playback must clear Discord's live timer while retaining its artist context.");
 
 var elapsedClock = new DiscordElapsedClock();
 var firstObservation = elapsedClock.Observe(playing with { PositionSeconds = 75 }, elapsedStart);

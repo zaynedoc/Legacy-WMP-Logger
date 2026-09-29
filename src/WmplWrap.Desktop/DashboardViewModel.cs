@@ -30,6 +30,7 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
     private readonly SnapshotStore _store;
     private readonly DashboardSettingsStore _settingsStore;
     private readonly DiscordPresenceService _discordPresence;
+    private readonly DashboardNavigationHistory _navigationHistory = new(new DashboardNavigationState(DashboardPage.Overview, DataView.Tracks));
     private IReadOnlyList<LibrarySnapshot> _snapshots = [];
     private DashboardPage _page = DashboardPage.Overview;
     private DataView _dataView = DataView.Tracks;
@@ -112,8 +113,8 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
         RefreshCommand = new RelayCommand(_ => Refresh());
         CaptureCommand = new AsyncRelayCommand(CaptureAsync, () => !_isCapturing);
         NavigateCommand = new RelayCommand(parameter => Navigate(parameter?.ToString()));
-        BackCommand = new RelayCommand(_ => MovePage(-1));
-        ForwardCommand = new RelayCommand(_ => MovePage(1));
+        BackCommand = new RelayCommand(_ => MoveBack());
+        ForwardCommand = new RelayCommand(_ => MoveForward());
         OpenSchedulerCommand = new RelayCommand(_ => OpenScheduler());
         ToggleSchedulerCommand = new AsyncRelayCommand(ToggleSchedulerAsync, () => true);
         ShowSnapshotStatusCommand = new RelayCommand(_ => ShowSnapshotStatus());
@@ -246,8 +247,8 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
     public Visibility SettingsVisibility => _page == DashboardPage.Settings ? Visibility.Visible : Visibility.Collapsed;
     public bool CanManageAlbumArt => _discordRpcEnabled;
     public bool ShouldKeepRunningInBackground => _discordRpcEnabled && _keepDiscordPresenceRunningWhenClosed;
-    public bool CanGoBack => _page != DashboardPage.Overview;
-    public bool CanGoForward => _page is not DashboardPage.Settings and not DashboardPage.AlbumArt;
+    public bool CanGoBack => _navigationHistory.CanGoBack;
+    public bool CanGoForward => _navigationHistory.CanGoForward;
     public string DataTitle => _dataView switch { DataView.Albums => "Top albums", DataView.Artists => "Top artists", _ => "Top songs" };
     public string DataCaption => TopCaption;
     public string DataContextColumn => _dataView switch { DataView.Albums => "TRACKS", DataView.Artists => "TOP ALBUM", _ => "ALBUM" };
@@ -510,16 +511,37 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
 
     private void Navigate(string? target)
     {
+        var page = DashboardPage.Overview;
+        var dataView = _dataView;
         if (target?.StartsWith("Data:", StringComparison.OrdinalIgnoreCase) == true)
         {
-            _dataView = Enum.TryParse<DataView>(target[5..], true, out var view) ? view : DataView.Tracks;
-            _page = DashboardPage.Data;
-            Refresh();
+            dataView = Enum.TryParse<DataView>(target[5..], true, out var view) ? view : DataView.Tracks;
+            page = DashboardPage.Data;
         }
         else
         {
-            _page = Enum.TryParse<DashboardPage>(target, true, out var page) ? page : DashboardPage.Overview;
+            page = Enum.TryParse<DashboardPage>(target, true, out var parsed) ? parsed : DashboardPage.Overview;
         }
+
+        if (_navigationHistory.Navigate(new DashboardNavigationState(page, dataView)))
+            ApplyNavigation(new DashboardNavigationState(page, dataView));
+    }
+
+    private void MoveBack()
+    {
+        if (_navigationHistory.TryGoBack(out var target)) ApplyNavigation(target);
+    }
+
+    private void MoveForward()
+    {
+        if (_navigationHistory.TryGoForward(out var target)) ApplyNavigation(target);
+    }
+
+    private void ApplyNavigation(DashboardNavigationState target)
+    {
+        _page = target.Page;
+        _dataView = target.DataView;
+        if (_page == DashboardPage.Data) Refresh();
         OnPropertyChanged(nameof(Breadcrumbs));
         OnPropertyChanged(nameof(OverviewVisibility));
         OnPropertyChanged(nameof(LatestSnapshotVisibility));
@@ -540,12 +562,6 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
     {
         Navigate("Settings");
         DiscordSettingsRequested?.Invoke();
-    }
-
-    private void MovePage(int direction)
-    {
-        var next = Math.Clamp((int)_page + direction, (int)DashboardPage.Overview, (int)DashboardPage.Settings);
-        Navigate(((DashboardPage)next).ToString());
     }
 
     private void Refresh()
@@ -1553,6 +1569,60 @@ internal sealed class DashboardSettingsStore(string dataDirectory)
 internal enum DashboardPage { Overview, Graphs, Data, LatestSnapshot, Settings, AlbumArt }
 internal enum DataView { Tracks, Albums, Artists }
 internal enum AutomaticSnapshotTaskState { Unavailable, Missing, Enabled, Disabled }
+
+internal readonly record struct DashboardNavigationState(DashboardPage Page, DataView DataView);
+
+/// <summary>
+/// Tracks the user's actual visit order rather than relying on the declaration order of pages.
+/// </summary>
+internal sealed class DashboardNavigationHistory(DashboardNavigationState initial)
+{
+    private readonly List<DashboardNavigationState> _back = [];
+    private readonly List<DashboardNavigationState> _forward = [];
+
+    public DashboardNavigationState Current { get; private set; } = initial;
+    public bool CanGoBack => _back.Count > 0;
+    public bool CanGoForward => _forward.Count > 0;
+
+    public bool Navigate(DashboardNavigationState target)
+    {
+        if (target == Current) return false;
+        _back.Add(Current);
+        _forward.Clear();
+        Current = target;
+        return true;
+    }
+
+    public bool TryGoBack(out DashboardNavigationState target)
+    {
+        if (_back.Count == 0)
+        {
+            target = Current;
+            return false;
+        }
+
+        _forward.Add(Current);
+        target = _back[^1];
+        _back.RemoveAt(_back.Count - 1);
+        Current = target;
+        return true;
+    }
+
+    public bool TryGoForward(out DashboardNavigationState target)
+    {
+        if (_forward.Count == 0)
+        {
+            target = Current;
+            return false;
+        }
+
+        _back.Add(Current);
+        target = _forward[^1];
+        _forward.RemoveAt(_forward.Count - 1);
+        Current = target;
+        return true;
+    }
+}
 
 internal sealed class RelayCommand(Action<object?> execute) : ICommand
 {
