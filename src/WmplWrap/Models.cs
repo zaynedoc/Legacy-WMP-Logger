@@ -19,7 +19,8 @@ public sealed record LibrarySnapshot(
 public sealed record ReportRow(
     TrackSnapshot Track,
     long Listens,
-    bool CounterWentBackwards);
+    bool CounterWentBackwards,
+    long FirstSeenListens = 0);
 
 public sealed record PeriodReport(
     LibrarySnapshot StartSnapshot,

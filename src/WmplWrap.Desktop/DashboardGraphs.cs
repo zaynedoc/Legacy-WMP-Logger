@@ -80,7 +80,9 @@ internal static class DashboardGraphBuilder
             DashboardGraphMode.Breakdown => "breakdown",
             _ => "activity"
         };
-        var summary = $"{intervals.Count:N0} observed {(intervals.Count == 1 ? "interval" : "intervals")} · {mode} by {metric}";
+        var includesFirstSeenCounts = intervals.Any(interval => interval.Rows.Any(row => row.FirstSeenListens > 0));
+        var summary = $"{intervals.Count:N0} recorded {(intervals.Count == 1 ? "interval" : "intervals")} · {mode} by {metric}";
+        if (includesFirstSeenCounts) summary += " · includes first-seen WMP counts";
         return new DashboardGraph(buckets.Select(bucket => bucket.Label).ToArray(), buckets.Select(bucket => bucket.Tooltip).ToArray(), series, summary, "");
     }
 
@@ -91,7 +93,7 @@ internal static class DashboardGraphBuilder
         {
             var baselineRows = snapshots[0].Tracks
                 .Where(track => track.PlayCount > 0)
-                .Select(track => new GraphRow(track, track.PlayCount))
+                .Select(track => new GraphRow(track, track.PlayCount, track.PlayCount))
                 .ToArray();
             if (baselineRows.Length > 0)
                 intervals.Add(new GraphInterval(null, snapshots[0].CapturedAtUtc, true, baselineRows));
@@ -99,10 +101,10 @@ internal static class DashboardGraphBuilder
 
         for (var index = 1; index < snapshots.Count; index++)
         {
-            var report = Reporting.Compare(snapshots[index - 1], snapshots[index]);
+            var report = Reporting.Compare(snapshots[index - 1], snapshots[index], includeBaseline);
             var rows = report.Rows
                 .Where(row => row.Listens > 0)
-                .Select(row => new GraphRow(row.Track, row.Listens))
+                .Select(row => new GraphRow(row.Track, row.Listens, row.FirstSeenListens))
                 .ToArray();
             intervals.Add(new GraphInterval(snapshots[index - 1].CapturedAtUtc, snapshots[index].CapturedAtUtc, false, rows));
         }
@@ -158,14 +160,17 @@ internal static class DashboardGraphBuilder
     private static string TooltipForBucket(IReadOnlyList<GraphInterval> intervals)
     {
         if (intervals.Count == 1 && intervals[0].IsBaseline)
-            return $"Baseline captured {ToEastern(intervals[0].End):MMM d, yyyy h:mm tt}";
+            return $"Baseline captured {ToEastern(intervals[0].End):MMM d, yyyy h:mm tt}\nIncludes first-seen WMP counts";
 
         var first = intervals[0];
         var last = intervals[^1];
         var start = first.Start ?? first.End;
-        return intervals.Count == 1
-            ? $"Observed {ToEastern(start):MMM d, yyyy h:mm tt} to {ToEastern(last.End):MMM d, yyyy h:mm tt}"
+        var label = intervals.Count == 1
+            ? $"Recorded {ToEastern(start):MMM d, yyyy h:mm tt} to {ToEastern(last.End):MMM d, yyyy h:mm tt}"
             : $"{intervals.Count:N0} snapshot intervals ending {ToEastern(first.End):MMM d} to {ToEastern(last.End):MMM d, yyyy}";
+        return intervals.Any(interval => interval.Rows.Any(row => row.FirstSeenListens > 0))
+            ? $"{label}\nIncludes first-seen WMP counts"
+            : label;
     }
 
     private static string[] SelectCategories(IReadOnlyList<GraphEntry> entries, DashboardGraphOptions options)
@@ -235,7 +240,7 @@ internal static class DashboardGraphBuilder
     private static DashboardGraph Empty(string message) => new([], [], [], "No chart data", message);
 
     private sealed record GraphInterval(DateTimeOffset? Start, DateTimeOffset End, bool IsBaseline, IReadOnlyList<GraphRow> Rows);
-    private sealed record GraphRow(TrackSnapshot Track, long Listens);
+    private sealed record GraphRow(TrackSnapshot Track, long Listens, long FirstSeenListens);
     private sealed record GraphEntry(DateTime Bucket, GraphInterval Interval, string Category, string TrackId, double Value);
     private sealed record GraphBucket(DateTime Key, string Label, string Tooltip, IReadOnlyList<GraphInterval> Intervals);
 }

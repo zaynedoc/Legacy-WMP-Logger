@@ -21,16 +21,17 @@ your top songs, albums, artists, and latest listening changes in a native Window
 ## How the history works
 
 Windows Media Player does not keep a dated play history; it exposes a cumulative
-`UserPlayCount` for each library item. Your first snapshot establishes a local
-baseline. Each later report compares two snapshots:
+`UserPlayCount` for each library item. Wrap calculates later listens from the
+change across consecutive snapshots:
 
 ```text
 listens in a period = max(0, end.UserPlayCount - start.UserPlayCount)
 ```
 
-WMPL Wrap can optionally include the first snapshot's existing counts ("baseline") in reports that
-include the baseline date. This makes a new installation useful immediately, while
-clearly treating those counts as baseline data rather than retroactively dated listens.
+By default, Wrap also includes a track's current WMP count when it first sees that
+track in a snapshot. This keeps newly added albums visible in the current report;
+the UI labels those values as **first-seen WMP counts**. Turn off **Include first-seen
+track counts in listening totals** in Settings for strict, delta-only reporting.
 
 ## Data recording
 

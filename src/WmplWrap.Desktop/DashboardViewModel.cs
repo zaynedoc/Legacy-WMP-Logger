@@ -807,17 +807,20 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
 
         var earlier = snapshots[selectedIndex - 1];
         var selected = snapshots[selectedIndex];
-        var report = Reporting.Compare(earlier, selected);
+        var report = Reporting.Compare(earlier, selected, IncludeBaselineSnapshot);
         var increases = report.Rows.Where(row => row.Listens > 0).ToArray();
+        var firstSeenListens = increases.Sum(row => row.FirstSeenListens);
         LatestSnapshotCaption = $"Changes from {ToEastern(earlier.CapturedAtUtc):MMM d h:mm tt} to {ToEastern(selected.CapturedAtUtc):MMM d h:mm tt}";
         LatestSnapshotSummary = increases.Length == 0
-            ? "No observed play-count increases"
-            : $"{increases.Length:N0} tracks with {increases.Sum(row => row.Listens):N0} new listens";
+            ? "No new or first-seen WMP counts"
+            : firstSeenListens > 0
+                ? $"{increases.Length:N0} tracks with {increases.Sum(row => row.Listens):N0} listens, including {firstSeenListens:N0} first-seen WMP plays"
+                : $"{increases.Length:N0} tracks with {increases.Sum(row => row.Listens):N0} new listens";
         foreach (var row in increases)
-            LatestSnapshotTracks.Add(DashboardSnapshotChange.From(row.Track, row.Listens, LatestSnapshotTracks.Count + 1));
-        LatestSnapshotEmptyMessage = "No play-count increases observed in this snapshot interval";
+            LatestSnapshotTracks.Add(DashboardSnapshotChange.From(row.Track, row.Listens, row.FirstSeenListens, LatestSnapshotTracks.Count + 1));
+        LatestSnapshotEmptyMessage = "No new or first-seen WMP counts in this snapshot interval";
         SnapshotSummaryLabel = "RECORDED INTERVAL";
-        SnapshotListenColumnHeader = "NEW LISTENS";
+        SnapshotListenColumnHeader = "LISTENS";
     }
 
     private void PopulateInsights(IReadOnlyList<LibrarySnapshot> snapshots)
@@ -825,9 +828,9 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
         TopTracks.Clear();
         TopAlbums.Clear();
         TopArtists.Clear();
-        var entries = GetPeriodTracks(snapshots, out var caption, out var emptyMessage, out var metricPeriodCaption);
+        var entries = GetPeriodTracks(snapshots, out var caption, out var emptyMessage, out var metricPeriodCaption, out var includesFirstSeenCounts);
         MetricPeriodCaption = metricPeriodCaption;
-        TopCaption = caption;
+        TopCaption = includesFirstSeenCounts ? $"{caption} · includes first-seen WMP counts" : caption;
         TopEmptyMessage = emptyMessage;
         OnPropertyChanged(nameof(DataCaption));
 
@@ -878,8 +881,14 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
             DataRows.Add(new DashboardDataRow(DataRows.Count + 1, group.Name, EmptyAsUnknown(group.First.Album, "Unknown album"), group.First.Album, $"{group.Count:N0}", AlbumArtResolver.For(group.First), new WmpOpenTarget(WmpOpenKind.Artist, group.First.SourceUrl, group.Name)));
     }
 
-    private IReadOnlyList<TrackTally> GetPeriodTracks(IReadOnlyList<LibrarySnapshot> snapshots, out string caption, out string emptyMessage, out string metricPeriodCaption)
+    private IReadOnlyList<TrackTally> GetPeriodTracks(
+        IReadOnlyList<LibrarySnapshot> snapshots,
+        out string caption,
+        out string emptyMessage,
+        out string metricPeriodCaption,
+        out bool includesFirstSeenCounts)
     {
+        includesFirstSeenCounts = false;
         if (snapshots.Count == 0)
         {
             caption = "Waiting for a WMP library snapshot";
@@ -897,7 +906,9 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
             if (IncludeBaselineSnapshot)
             {
                 emptyMessage = "No audio tracks found in the latest snapshot";
-                return latest.Tracks.Where(track => track.PlayCount > 0).Select(track => new TrackTally(track, track.PlayCount)).ToArray();
+                var allTimeTallies = latest.Tracks.Where(track => track.PlayCount > 0).Select(track => new TrackTally(track, track.PlayCount, track.PlayCount)).ToArray();
+                includesFirstSeenCounts = allTimeTallies.Length > 0;
+                return allTimeTallies;
             }
 
             if (snapshots.Count < 2)
@@ -907,7 +918,8 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
             }
 
             emptyMessage = "No play-count increases observed since the first snapshot";
-            return ToTallies(Reporting.Compare(baseline, latest));
+            var observedAllTime = ToTallies(Reporting.CompareIntervals(snapshots, baseline.CapturedAtUtc, false));
+            return observedAllTime;
         }
 
         var span = SelectedPeriod switch { "Past week" => TimeSpan.FromDays(7), "Past month" => TimeSpan.FromDays(31), "Past year" => TimeSpan.FromDays(365), _ => TimeSpan.Zero };
@@ -921,32 +933,32 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
             if (IncludeBaselineSnapshot && includesBaselineDate)
             {
                 emptyMessage = "No audio tracks found in the first snapshot";
-                return BaselineTallies(baseline);
+                var baselineTallies = BaselineTallies(baseline);
+                includesFirstSeenCounts = baselineTallies.Count > 0;
+                return baselineTallies;
             }
 
             emptyMessage = "Capture one more snapshot to calculate new listens";
             return [];
         }
 
-        var start = snapshots.LastOrDefault(snapshot => snapshot.CapturedAtUtc <= latest.CapturedAtUtc - span);
-        if (start is null)
-        {
-            start = baseline;
-            emptyMessage = "No play-count increases observed since the first snapshot";
-            var observed = ToTallies(Reporting.Compare(start, latest));
-            return IncludeBaselineSnapshot && includesBaselineDate ? IncludeBaselineTallies(baseline, observed) : observed;
-        }
-
         emptyMessage = "No play-count increases observed in this period";
-        var entries = ToTallies(Reporting.Compare(start, latest));
-        return IncludeBaselineSnapshot && includesBaselineDate ? IncludeBaselineTallies(baseline, entries) : entries;
+        var entries = ToTallies(Reporting.CompareIntervals(snapshots, comparisonStart, IncludeBaselineSnapshot));
+        if (IncludeBaselineSnapshot && includesBaselineDate)
+            entries = IncludeBaselineTallies(baseline, entries);
+
+        includesFirstSeenCounts = entries.Any(entry => entry.FirstSeenListens > 0);
+        return entries;
     }
 
     private static IReadOnlyList<TrackTally> BaselineTallies(LibrarySnapshot baseline) =>
-        baseline.Tracks.Where(track => track.PlayCount > 0).Select(track => new TrackTally(track, track.PlayCount)).ToArray();
+        baseline.Tracks.Where(track => track.PlayCount > 0).Select(track => new TrackTally(track, track.PlayCount, track.PlayCount)).ToArray();
 
     private static IReadOnlyList<TrackTally> ToTallies(PeriodReport report) =>
-        report.Rows.Where(row => row.Listens > 0).Select(row => new TrackTally(row.Track, row.Listens)).ToArray();
+        ToTallies(report.Rows);
+
+    private static IReadOnlyList<TrackTally> ToTallies(IEnumerable<ReportRow> rows) =>
+        rows.Where(row => row.Listens > 0).Select(row => new TrackTally(row.Track, row.Listens, row.FirstSeenListens)).ToArray();
 
     private static IReadOnlyList<TrackTally> IncludeBaselineTallies(LibrarySnapshot baseline, IReadOnlyList<TrackTally> observed)
     {
@@ -954,7 +966,7 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
         foreach (var entry in observed)
         {
             if (totals.TryGetValue(entry.Track.Id, out var existing))
-                totals[entry.Track.Id] = new TrackTally(entry.Track, existing.Count + entry.Count);
+                totals[entry.Track.Id] = new TrackTally(entry.Track, existing.Count + entry.Count, existing.FirstSeenListens + entry.FirstSeenListens);
             else
                 totals[entry.Track.Id] = entry;
         }
@@ -1485,13 +1497,13 @@ public sealed record DashboardSnapshotChange(int Rank, string Title, string Arti
         AlbumArtResolver.For(track),
         new WmpOpenTarget(WmpOpenKind.Track, track.SourceUrl, track.Title));
 
-    public static DashboardSnapshotChange From(TrackSnapshot track, long listens, int rank) => new(
+    public static DashboardSnapshotChange From(TrackSnapshot track, long listens, long firstSeenListens, int rank) => new(
         rank,
         track.Title,
         string.IsNullOrWhiteSpace(track.Artist) ? "Unknown artist" : track.Artist,
         string.IsNullOrWhiteSpace(track.Album) ? "Unknown album" : track.Album,
         FormatTrackDuration(track.Duration),
-        $"+{listens:N0}",
+        firstSeenListens > 0 ? $"{listens:N0} first-seen" : $"+{listens:N0}",
         track.PlayCount.ToString("N0", CultureInfo.CurrentCulture),
         AlbumArtResolver.For(track),
         new WmpOpenTarget(WmpOpenKind.Track, track.SourceUrl, track.Title));
@@ -1503,7 +1515,7 @@ public sealed record DashboardSnapshotChange(int Rank, string Title, string Arti
         return span.TotalHours >= 1 ? $"{(int)span.TotalHours}:{span.Minutes:D2}:{span.Seconds:D2}" : $"{span.Minutes}:{span.Seconds:D2}";
     }
 }
-internal sealed record TrackTally(TrackSnapshot Track, long Count);
+internal sealed record TrackTally(TrackSnapshot Track, long Count, long FirstSeenListens = 0);
 internal sealed record DashboardPreferences(
     bool IncludeBaselineSnapshot = true,
     bool OpenInWmpOnDoubleClick = true,

@@ -19,6 +19,33 @@ Assert(report.Rows.Single(row => row.Track.Id == "one").Listens == 4, "Cumulativ
 Assert(report.Rows.Single(row => row.Track.Id == "two").CounterWentBackwards, "A decrease should be flagged as a reset.");
 Assert(report.Rows.Single(row => row.Track.Id == "two").Listens == 0, "A reset must never become negative or invented listens.");
 Assert(report.NewTracksWithoutBaseline == 1, "New tracks must be excluded until their next baseline.");
+
+var firstSeenReport = Reporting.Compare(first, second, includeFirstSeenCounts: true);
+Assert(firstSeenReport.Rows.Single(row => row.Track.Id == "three") is { Listens: 7, FirstSeenListens: 7 }, "Enabled first-seen counts must include a newly discovered track's current WMP total.");
+
+var third = new LibrarySnapshot(1, new DateTimeOffset(2026, 9, 24, 4, 5, 0, TimeSpan.Zero), "Eastern Standard Time",
+[
+    Track("one", "Existing", 16),
+    Track("two", "Reset", 3),
+    Track("three", "New without a baseline", 12)
+]);
+var strictIntervals = Reporting.CompareIntervals([first, second, third], first.CapturedAtUtc, includeFirstSeenCounts: false);
+Assert(strictIntervals.Single(row => row.Track.Id == "three") is { Listens: 5, FirstSeenListens: 0 }, "Strict interval reports must omit an unknown initial count but retain later deltas.");
+var firstSeenIntervals = Reporting.CompareIntervals([first, second, third], first.CapturedAtUtc, includeFirstSeenCounts: true);
+Assert(firstSeenIntervals.Single(row => row.Track.Id == "three") is { Listens: 12, FirstSeenListens: 7 }, "First-seen interval reports must retain both the initial count and later increases.");
+
+var graph = DashboardGraphBuilder.Build([first, second], new DashboardGraphOptions(
+    DashboardGraphRange.AllTime,
+    DashboardGraphMeasure.Listens,
+    DashboardGraphGrouping.Total,
+    DashboardGraphGranularity.Day,
+    DashboardGraphMode.Activity,
+    null,
+    null,
+    true,
+    6,
+    true));
+Assert(graph.Summary.Contains("includes first-seen WMP counts", StringComparison.Ordinal), "Graphs must disclose when first-seen counts are included.");
 var defaults = new DiscordRpcPreferences();
 Assert(!defaults.Enabled, "Discord Rich Presence must default to disabled.");
 Assert(defaults.ApplicationId == "1553580075688009838", "The shared Discord Application ID must be the default.");
