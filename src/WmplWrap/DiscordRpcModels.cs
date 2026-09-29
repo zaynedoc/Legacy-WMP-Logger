@@ -53,6 +53,7 @@ public sealed record DiscordPresencePayload(
     string LargeImageText,
     string SmallImageKey,
     string SmallImageText,
+    string GoogleSearchUrl,
     bool UsesFallbackArtwork,
     DateTimeOffset? ElapsedSinceUtc);
 
@@ -86,8 +87,17 @@ public static class DiscordPresenceFormatter
             Clip(string.IsNullOrWhiteSpace(albumText) ? "Windows Media Player" : albumText, 128),
             WmpIconKey,
             "Windows Media Player",
+            CreateGoogleSearchUrl(title, artist),
             mapping is null,
             playback.State == WmpPlaybackState.Playing ? elapsedSinceUtc : null);
+    }
+
+    private static string CreateGoogleSearchUrl(string title, string artist)
+    {
+        const string prefix = "https://www.google.com/search?q=";
+        var query = $"{title} {artist}".Trim();
+        var encoded = Uri.EscapeDataString(query);
+        return prefix + (encoded.Length <= 480 ? encoded : Uri.EscapeDataString(Clip(query, 39)));
     }
 
     private static string Clip(string value, int maximum) => value.Length <= maximum ? value : value[..Math.Max(1, maximum - 1)] + "\u2026";

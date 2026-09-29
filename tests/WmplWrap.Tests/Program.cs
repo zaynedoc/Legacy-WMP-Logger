@@ -56,7 +56,7 @@ var playing = new WmpPlaybackSnapshot("Song", "Artist", "Album", "Album Artist",
 var mapping = new DiscordAlbumArtMapping(" album artist ", " ALBUM ", "album_cover");
 var elapsedStart = new DateTimeOffset(2026, 9, 28, 3, 0, 0, TimeSpan.Zero);
 var mappedPresence = DiscordPresenceFormatter.Create(playing, [mapping], elapsedStart);
-Assert(mappedPresence is { Details: "\u201cSong\u201d", State: "by Artist", LargeImageKey: "album_cover", UsesFallbackArtwork: false, ElapsedSinceUtc: not null }, "A matching artist and album must select the configured Discord asset and format its artist.");
+Assert(mappedPresence is { Details: "\u201cSong\u201d", State: "by Artist", LargeImageKey: "album_cover", GoogleSearchUrl: "https://www.google.com/search?q=Song%20Artist", UsesFallbackArtwork: false, ElapsedSinceUtc: not null }, "A matching artist and album must select the configured Discord asset, format its artist, and create a Google search link.");
 var fallbackPresence = DiscordPresenceFormatter.Create(playing, []);
 Assert(fallbackPresence is { LargeImageKey: "wmp_empty", UsesFallbackArtwork: true }, "Unmapped albums must use the fallback Discord asset.");
 Assert(DiscordPresenceFormatter.Create(WmpPlaybackSnapshot.None, []) is null, "Stopped playback must clear Rich Presence.");

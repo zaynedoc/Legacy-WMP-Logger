@@ -136,6 +136,8 @@ Unregister-ScheduledTask -TaskName "WMPL Wrap Daily Snapshot" -Confirm:$false
   artwork key. Snapshot history and media files are never sent to WMPL Wrap or Discord.
 - **Elapsed time:** Starts from WMP's current position, recalibrates after a seek, and is
   hidden while paused.
+- **Google This Song:** The active presence includes a Discord button that opens a Google
+  search for the displayed track and artist.
 - **Track changes:** Keeps the last activity for up to five seconds during WMP's brief
   no-track handoff. Disable that option in Settings to clear Discord immediately.
 - **Default application:** `1553580075688009838`, named **WMPL Wrap Rich Presence**, with

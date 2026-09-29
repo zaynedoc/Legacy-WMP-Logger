@@ -183,6 +183,14 @@ internal sealed class DiscordPresenceService : IDisposable
                         SmallImageKey = payload.SmallImageKey,
                         SmallImageText = payload.SmallImageText
                     },
+                    Buttons =
+                    [
+                        new DiscordRPC.Button
+                        {
+                            Label = "Google This Song",
+                            Url = payload.GoogleSearchUrl
+                        }
+                    ],
                     Timestamps = payload.ElapsedSinceUtc is { } elapsedSince
                         ? new Timestamps(elapsedSince.UtcDateTime)
                         : null
