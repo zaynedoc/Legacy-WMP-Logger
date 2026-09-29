@@ -63,15 +63,16 @@ var settingsDirectory = Path.Combine(Path.GetTempPath(), "WMPL-Wrap-Tests", Guid
 try
 {
     var settingsStore = new DashboardSettingsStore(settingsDirectory);
-    var savedPreferences = new DashboardPreferences(false, false, new DiscordRpcPreferences(true, "1553580075688009838", false, [mapping], false, true));
+    var savedPreferences = new DashboardPreferences(false, false, new DiscordRpcPreferences(true, "1553580075688009838", false, [mapping], false, true), DesktopTheme.Dark, 312);
     settingsStore.Save(savedPreferences);
     var loadedPreferences = settingsStore.Load();
     Assert(loadedPreferences.DiscordRpc is { Enabled: true, DetectStalledPlayback: false, KeepPresenceBetweenTracks: false, KeepRunningWhenClosed: true }, "Discord preferences must persist with existing desktop settings.");
     Assert(loadedPreferences.DiscordRpc!.Mappings.Single().AssetKey == "album_cover", "Album-art mappings must persist locally.");
+    Assert(loadedPreferences is { DesktopTheme: DesktopTheme.Dark, AccentHue: 312 }, "Appearance preferences must persist with existing desktop settings.");
 
     File.WriteAllText(Path.Combine(settingsDirectory, "desktop-settings.json"), "{\"IncludeBaselineSnapshot\":false,\"OpenInWmpOnDoubleClick\":false}");
     var migratedPreferences = settingsStore.Load();
-    Assert(migratedPreferences.DiscordRpc is null, "Older settings files must remain readable without Discord fields.");
+    Assert(migratedPreferences is { DiscordRpc: null, DesktopTheme: DesktopTheme.Light, AccentHue: ThemeManager.DefaultAccentHue }, "Older settings files must remain readable and use the default appearance.");
 
     File.WriteAllText(Path.Combine(settingsDirectory, "desktop-settings.json"), "{\"DiscordRpc\":{\"Enabled\":true,\"ApplicationId\":\"1553580075688009838\",\"DetectStalledPlayback\":true,\"AlbumArtMappings\":[]}}");
     var upgradedDiscordPreferences = settingsStore.Load();

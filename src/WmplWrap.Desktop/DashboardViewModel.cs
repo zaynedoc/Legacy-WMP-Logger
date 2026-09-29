@@ -16,6 +16,7 @@ using LiveChartsCore.SkiaSharpView;
 using LiveChartsCore.SkiaSharpView.Painting;
 using SkiaSharp;
 using Application = System.Windows.Application;
+using Brush = System.Windows.Media.Brush;
 using Color = System.Windows.Media.Color;
 using MessageBox = System.Windows.MessageBox;
 
@@ -41,6 +42,8 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
     private bool _detectStalledPlayback = true;
     private bool _keepDiscordPresenceBetweenTracks = true;
     private bool _keepDiscordPresenceRunningWhenClosed;
+    private DesktopTheme _desktopTheme = DesktopTheme.Light;
+    private int _accentHue = ThemeManager.DefaultAccentHue;
     private AutomaticSnapshotTaskState _automaticSnapshotTaskState = AutomaticSnapshotTaskState.Unavailable;
     private string _discordApplicationId = DiscordRpcPreferences.DefaultApplicationId;
     private string _discordStatus = "Discord Rich Presence is disabled";
@@ -93,6 +96,9 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
         var preferences = _settingsStore.Load();
         _includeBaselineSnapshot = preferences.IncludeBaselineSnapshot;
         _openInWmpOnDoubleClick = preferences.OpenInWmpOnDoubleClick;
+        _desktopTheme = preferences.DesktopTheme;
+        _accentHue = ThemeManager.NormalizeHue(preferences.AccentHue);
+        ThemeManager.Apply(_desktopTheme, _accentHue);
         var discord = preferences.DiscordRpc ?? new DiscordRpcPreferences();
         _discordRpcEnabled = discord.Enabled;
         _detectStalledPlayback = discord.DetectStalledPlayback;
@@ -123,6 +129,7 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
         SaveAlbumArtMappingCommand = new RelayCommand(_ => SaveAlbumArtMapping());
         DeleteAlbumArtMappingCommand = new RelayCommand(_ => DeleteAlbumArtMapping());
         UseCurrentTrackForAlbumArtCommand = new RelayCommand(_ => UseCurrentTrackForAlbumArt());
+        ResetAppearanceCommand = new RelayCommand(_ => ResetAppearance());
         Refresh();
         RefreshSchedulerState();
         if (_discordRpcEnabled) StartDiscordPresence();
@@ -130,6 +137,7 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
 
     public event PropertyChangedEventHandler? PropertyChanged;
     public event Action? DiscordSettingsRequested;
+    public event Action? AppearanceChanged;
     public ObservableCollection<DashboardSnapshotChange> LatestSnapshotTracks { get; } = [];
     public ObservableCollection<DashboardSnapshotOption> SnapshotOptions { get; } = [];
     public ObservableCollection<DashboardSong> TopTracks { get; } = [];
@@ -139,6 +147,7 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
     public ObservableCollection<DashboardGraphLegendItem> GraphLegendItems { get; } = [];
     public ObservableCollection<DiscordAlbumArtMapping> AlbumArtMappings { get; } = [];
     public IReadOnlyList<string> PeriodOptions { get; } = ["All time", "Past week", "Past month", "Past year"];
+    public IReadOnlyList<string> ThemeOptions { get; } = ["Light", "Dark"];
     public IReadOnlyList<string> GraphRangeOptions { get; } = ["Past week", "Past month", "Past year", "All time", "Custom range"];
     public IReadOnlyList<string> GraphMeasureOptions { get; } = ["Listens", "Listening time", "Tracks listened"];
     public IReadOnlyList<string> GraphGroupingOptions { get; } = ["Total", "Artist", "Album", "Track"];
@@ -165,7 +174,11 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
     public ICommand SaveAlbumArtMappingCommand { get; }
     public ICommand DeleteAlbumArtMappingCommand { get; }
     public ICommand UseCurrentTrackForAlbumArtCommand { get; }
+    public ICommand ResetAppearanceCommand { get; } = null!;
     public string DataDirectory { get; }
+    public Brush AccentPreview => ThemeManager.AccentBrush;
+    public string AccentHueLabel => $"{AccentHueName(_accentHue)} ({_accentHue}°)";
+    public bool IsDarkTheme => _desktopTheme == DesktopTheme.Dark;
     public string DataLocationLabel => $"";
     public string SnapshotSummary { get => _snapshotSummary; private set => Set(ref _snapshotSummary, value); }
     public string LatestSnapshotCaption { get => _latestSnapshotCaption; private set => Set(ref _latestSnapshotCaption, value); }
@@ -262,6 +275,36 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
             _openInWmpOnDoubleClick = value;
             SavePreferences();
             OnPropertyChanged();
+        }
+    }
+
+    public string SelectedTheme
+    {
+        get => _desktopTheme.ToString();
+        set
+        {
+            var theme = string.Equals(value, "Dark", StringComparison.OrdinalIgnoreCase) ? DesktopTheme.Dark : DesktopTheme.Light;
+            if (_desktopTheme == theme) return;
+            _desktopTheme = theme;
+            ApplyAppearance();
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(IsDarkTheme));
+            OnPropertyChanged(nameof(AccentPreview));
+        }
+    }
+
+    public int AccentHue
+    {
+        get => _accentHue;
+        set
+        {
+            var normalized = ThemeManager.NormalizeHue(value);
+            if (_accentHue == normalized) return;
+            _accentHue = normalized;
+            ApplyAppearance();
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(AccentHueLabel));
+            OnPropertyChanged(nameof(AccentPreview));
         }
     }
 
@@ -598,8 +641,8 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
             new Axis
             {
                 Labels = graph.Labels,
-                LabelsPaint = new SolidColorPaint(SKColor.Parse("#567085")),
-                SeparatorsPaint = new SolidColorPaint(SKColor.Parse("#DCE7F3")),
+                LabelsPaint = new SolidColorPaint(SKColor.Parse(ThemeManager.GraphLabelColorHex)),
+                SeparatorsPaint = new SolidColorPaint(SKColor.Parse(ThemeManager.GraphRuleColorHex)),
                 TextSize = 11,
                 ForceStepToMin = true,
                 MinStep = 1
@@ -610,8 +653,8 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
             new Axis
             {
                 Labeler = value => FormatGraphValue(value, _graphMeasure),
-                LabelsPaint = new SolidColorPaint(SKColor.Parse("#567085")),
-                SeparatorsPaint = new SolidColorPaint(SKColor.Parse("#DCE7F3")),
+                LabelsPaint = new SolidColorPaint(SKColor.Parse(ThemeManager.GraphLabelColorHex)),
+                SeparatorsPaint = new SolidColorPaint(SKColor.Parse(ThemeManager.GraphRuleColorHex)),
                 TextSize = 11,
                 MinLimit = 0
             }
@@ -1270,7 +1313,41 @@ public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
     private void SavePreferences() => _settingsStore.Save(new DashboardPreferences(
         _includeBaselineSnapshot,
         _openInWmpOnDoubleClick,
-        CreateDiscordPreferences()));
+        CreateDiscordPreferences(),
+        _desktopTheme,
+        _accentHue));
+
+    private void ApplyAppearance()
+    {
+        ThemeManager.Apply(_desktopTheme, _accentHue);
+        PopulateGraph(_snapshots);
+        SavePreferences();
+        AppearanceChanged?.Invoke();
+    }
+
+    private void ResetAppearance()
+    {
+        _desktopTheme = DesktopTheme.Light;
+        _accentHue = ThemeManager.DefaultAccentHue;
+        ApplyAppearance();
+        OnPropertyChanged(nameof(SelectedTheme));
+        OnPropertyChanged(nameof(AccentHue));
+        OnPropertyChanged(nameof(AccentHueLabel));
+        OnPropertyChanged(nameof(AccentPreview));
+        OnPropertyChanged(nameof(IsDarkTheme));
+    }
+
+    private static string AccentHueName(int hue) => ThemeManager.NormalizeHue(hue) switch
+    {
+        >= 345 or < 15 => "Red",
+        < 45 => "Orange",
+        < 70 => "Gold",
+        < 155 => "Green",
+        < 195 => "Teal",
+        < 250 => "Blue",
+        < 300 => "Violet",
+        _ => "Rose"
+    };
 
     private static void OpenScheduler() => Process.Start(new ProcessStartInfo("taskschd.msc") { UseShellExecute = true });
     private static void OpenGitHub() => Process.Start(new ProcessStartInfo(Environment.GetEnvironmentVariable("WMPL_WRAP_REPOSITORY_URL") ?? DefaultRepositoryUrl) { UseShellExecute = true });
@@ -1430,7 +1507,9 @@ internal sealed record TrackTally(TrackSnapshot Track, long Count);
 internal sealed record DashboardPreferences(
     bool IncludeBaselineSnapshot = true,
     bool OpenInWmpOnDoubleClick = true,
-    DiscordRpcPreferences? DiscordRpc = null);
+    DiscordRpcPreferences? DiscordRpc = null,
+    DesktopTheme DesktopTheme = global::WmplWrap.Desktop.DesktopTheme.Light,
+    int AccentHue = ThemeManager.DefaultAccentHue);
 
 internal sealed class DashboardSettingsStore(string dataDirectory)
 {

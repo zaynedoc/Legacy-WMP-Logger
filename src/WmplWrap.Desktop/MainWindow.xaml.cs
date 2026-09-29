@@ -13,6 +13,7 @@ public partial class MainWindow : Window
 {
     private Forms.NotifyIcon? _trayIcon;
     private DashboardViewModel? _viewModel;
+    private nint _windowHandle;
     private bool _exitRequested;
 
     public MainWindow()
@@ -20,6 +21,7 @@ public partial class MainWindow : Window
         InitializeComponent();
         _viewModel = new DashboardViewModel();
         _viewModel.DiscordSettingsRequested += ScrollToDiscordSettings;
+        _viewModel.AppearanceChanged += ApplyWindowAppearance;
         DataContext = _viewModel;
     }
 
@@ -40,6 +42,7 @@ public partial class MainWindow : Window
         if (_viewModel is not null)
         {
             _viewModel.DiscordSettingsRequested -= ScrollToDiscordSettings;
+            _viewModel.AppearanceChanged -= ApplyWindowAppearance;
             _viewModel.Dispose();
             _viewModel = null;
         }
@@ -50,7 +53,9 @@ public partial class MainWindow : Window
     protected override void OnSourceInitialized(EventArgs e)
     {
         base.OnSourceInitialized(e);
-        TaskbarIdentity.ConfigureWindow(new WindowInteropHelper(this).Handle);
+        _windowHandle = new WindowInteropHelper(this).Handle;
+        TaskbarIdentity.ConfigureWindow(_windowHandle);
+        ApplyWindowAppearance();
     }
 
     protected override void OnPreviewMouseDown(MouseButtonEventArgs e)
@@ -96,6 +101,12 @@ public partial class MainWindow : Window
             SettingsScrollViewer.UpdateLayout();
             DiscordRpcSettingsCard.BringIntoView();
         }));
+    }
+
+    private void ApplyWindowAppearance()
+    {
+        if (_windowHandle == 0 || _viewModel is null) return;
+        WindowAppearance.ApplyDarkTitleBar(_windowHandle, _viewModel.IsDarkTheme);
     }
 
     private void HideToTray()
