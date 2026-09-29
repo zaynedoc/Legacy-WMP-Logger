@@ -14,16 +14,20 @@ using LiveChartsCore;
 using LiveChartsCore.SkiaSharpView;
 using LiveChartsCore.SkiaSharpView.Painting;
 using SkiaSharp;
+using Application = System.Windows.Application;
+using Color = System.Windows.Media.Color;
+using MessageBox = System.Windows.MessageBox;
 
 namespace WmplWrap.Desktop;
 
-public sealed class DashboardViewModel : INotifyPropertyChanged
+public sealed class DashboardViewModel : INotifyPropertyChanged, IDisposable
 {
     private const string ScheduledTaskName = "WMPL Wrap Daily Snapshot";
     private const string DefaultRepositoryUrl = "https://github.com/zaynedoc/WMPL-Wrap";
     private static string _sessionPeriod = "All time";
     private readonly SnapshotStore _store;
     private readonly DashboardSettingsStore _settingsStore;
+    private readonly DiscordPresenceService _discordPresence;
     private IReadOnlyList<LibrarySnapshot> _snapshots = [];
     private DashboardPage _page = DashboardPage.Overview;
     private DataView _dataView = DataView.Tracks;
@@ -32,6 +36,21 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
     private bool _includeBaselineSnapshot = true;
     private bool _openInWmpOnDoubleClick = true;
     private bool _isCheckingForUpdates;
+    private bool _discordRpcEnabled;
+    private bool _detectStalledPlayback = true;
+    private bool _keepDiscordPresenceBetweenTracks = true;
+    private string _discordApplicationId = DiscordRpcPreferences.DefaultApplicationId;
+    private string _discordStatus = "Discord Rich Presence is disabled";
+    private string _discordNowPlaying = "No status is being shared";
+    private string _discordArtworkStatus = "Fallback asset: wmp_empty";
+    private string _discordLastError = "";
+    private string _discordLastUpdated = "";
+    private DiscordAlbumArtMapping? _selectedAlbumArtMapping;
+    private string _albumArtArtist = "";
+    private string _albumArtTitle = "";
+    private string _albumArtAssetKey = "";
+    private ImageSource? _albumArtPreview;
+    private string _albumArtPreviewStatus = "Select a mapping or use the current WMP track";
     private DashboardGraphRange _graphRange = DashboardGraphRange.PastMonth;
     private DashboardGraphMeasure _graphMeasure = DashboardGraphMeasure.Listens;
     private DashboardGraphGrouping _graphGrouping = DashboardGraphGrouping.Total;
@@ -70,6 +89,15 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
         var preferences = _settingsStore.Load();
         _includeBaselineSnapshot = preferences.IncludeBaselineSnapshot;
         _openInWmpOnDoubleClick = preferences.OpenInWmpOnDoubleClick;
+        var discord = preferences.DiscordRpc ?? new DiscordRpcPreferences();
+        _discordRpcEnabled = discord.Enabled;
+        _detectStalledPlayback = discord.DetectStalledPlayback;
+        _keepDiscordPresenceBetweenTracks = discord.KeepPresenceBetweenTracks;
+        _discordApplicationId = string.IsNullOrWhiteSpace(discord.ApplicationId) ? DiscordRpcPreferences.DefaultApplicationId : discord.ApplicationId;
+        foreach (var mapping in discord.Mappings) AlbumArtMappings.Add(mapping);
+        _albumArtPreview = AlbumArtResolver.DiscordFallback();
+        _discordPresence = new DiscordPresenceService();
+        _discordPresence.StatusChanged += OnDiscordStatusChanged;
         RefreshCommand = new RelayCommand(_ => Refresh());
         CaptureCommand = new AsyncRelayCommand(CaptureAsync, () => !_isCapturing);
         NavigateCommand = new RelayCommand(parameter => Navigate(parameter?.ToString()));
@@ -81,8 +109,17 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
         OpenGitHubCommand = new RelayCommand(_ => OpenGitHub());
         OpenReleasesCommand = new RelayCommand(_ => OpenReleases());
         CheckForUpdatesCommand = new AsyncRelayCommand(CheckForUpdatesAsync, () => !_isCheckingForUpdates);
+        SaveDiscordSettingsCommand = new RelayCommand(_ => SaveDiscordSettings());
+        RefreshDiscordCommand = new AsyncRelayCommand(() => _discordPresence.RefreshAsync(), () => _discordRpcEnabled);
+        ReconnectDiscordCommand = new RelayCommand(_ => ReconnectDiscord());
+        OpenDiscordDeveloperPortalCommand = new RelayCommand(_ => OpenDiscordDeveloperPortal());
+        OpenAlbumArtCommand = new RelayCommand(_ => Navigate("AlbumArt"));
+        SaveAlbumArtMappingCommand = new RelayCommand(_ => SaveAlbumArtMapping());
+        DeleteAlbumArtMappingCommand = new RelayCommand(_ => DeleteAlbumArtMapping());
+        UseCurrentTrackForAlbumArtCommand = new RelayCommand(_ => UseCurrentTrackForAlbumArt());
         Refresh();
         RefreshSchedulerState();
+        if (_discordRpcEnabled) StartDiscordPresence();
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -93,6 +130,7 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
     public ObservableCollection<DashboardAggregate> TopArtists { get; } = [];
     public ObservableCollection<DashboardDataRow> DataRows { get; } = [];
     public ObservableCollection<DashboardGraphLegendItem> GraphLegendItems { get; } = [];
+    public ObservableCollection<DiscordAlbumArtMapping> AlbumArtMappings { get; } = [];
     public IReadOnlyList<string> PeriodOptions { get; } = ["All time", "Past week", "Past month", "Past year"];
     public IReadOnlyList<string> GraphRangeOptions { get; } = ["Past week", "Past month", "Past year", "All time", "Custom range"];
     public IReadOnlyList<string> GraphMeasureOptions { get; } = ["Listens", "Listening time", "Tracks listened"];
@@ -111,6 +149,14 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
     public ICommand OpenGitHubCommand { get; }
     public ICommand OpenReleasesCommand { get; }
     public ICommand CheckForUpdatesCommand { get; }
+    public ICommand SaveDiscordSettingsCommand { get; }
+    public ICommand RefreshDiscordCommand { get; }
+    public ICommand ReconnectDiscordCommand { get; }
+    public ICommand OpenDiscordDeveloperPortalCommand { get; }
+    public ICommand OpenAlbumArtCommand { get; }
+    public ICommand SaveAlbumArtMappingCommand { get; }
+    public ICommand DeleteAlbumArtMappingCommand { get; }
+    public ICommand UseCurrentTrackForAlbumArtCommand { get; }
     public string DataDirectory { get; }
     public string DataLocationLabel => $"Data: {DataDirectory}";
     public string SnapshotSummary { get => _snapshotSummary; private set => Set(ref _snapshotSummary, value); }
@@ -130,6 +176,13 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
     public string UpdateStatus { get => _updateStatus; private set => Set(ref _updateStatus, value); }
     public string GraphSummary { get => _graphSummary; private set => Set(ref _graphSummary, value); }
     public string GraphEmptyMessage { get => _graphEmptyMessage; private set => Set(ref _graphEmptyMessage, value); }
+    public string DiscordStatus { get => _discordStatus; private set => Set(ref _discordStatus, value); }
+    public string DiscordNowPlaying { get => _discordNowPlaying; private set => Set(ref _discordNowPlaying, value); }
+    public string DiscordArtworkStatus { get => _discordArtworkStatus; private set => Set(ref _discordArtworkStatus, value); }
+    public string DiscordLastError { get => _discordLastError; private set => Set(ref _discordLastError, value); }
+    public string DiscordLastUpdated { get => _discordLastUpdated; private set => Set(ref _discordLastUpdated, value); }
+    public ImageSource? AlbumArtPreview { get => _albumArtPreview; private set => Set(ref _albumArtPreview, value); }
+    public string AlbumArtPreviewStatus { get => _albumArtPreviewStatus; private set => Set(ref _albumArtPreviewStatus, value); }
     public ISeries[] GraphSeries { get => _graphSeries; private set => Set(ref _graphSeries, value); }
     public Axis[] GraphXAxes { get => _graphXAxes; private set => Set(ref _graphXAxes, value); }
     public Axis[] GraphYAxes { get => _graphYAxes; private set => Set(ref _graphYAxes, value); }
@@ -141,11 +194,13 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
     public Visibility GraphEmptyVisibility => GraphSeries.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
     public Visibility GraphCustomDateVisibility => _graphRange == DashboardGraphRange.Custom ? Visibility.Visible : Visibility.Collapsed;
     public Visibility GraphSeriesOptionsVisibility => _graphGrouping == DashboardGraphGrouping.Total ? Visibility.Collapsed : Visibility.Visible;
+    public Visibility AlbumArtVisibility => _page == DashboardPage.AlbumArt ? Visibility.Visible : Visibility.Collapsed;
     public string Breadcrumbs => _page switch
     {
         DashboardPage.LatestSnapshot => "Data  >  Snapshot history",
         DashboardPage.Graphs => "Library  >  Graphs",
         DashboardPage.Data => $"Data  >  {DataTitle}",
+        DashboardPage.AlbumArt => "Library  >  Settings  >  Discord Rich Presence  >  Album art",
         DashboardPage.Settings => "Library  >  Settings",
         _ => "Library  >  Listening history"
     };
@@ -154,8 +209,9 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
     public Visibility GraphsVisibility => _page == DashboardPage.Graphs ? Visibility.Visible : Visibility.Collapsed;
     public Visibility DataVisibility => _page == DashboardPage.Data ? Visibility.Visible : Visibility.Collapsed;
     public Visibility SettingsVisibility => _page == DashboardPage.Settings ? Visibility.Visible : Visibility.Collapsed;
+    public bool CanManageAlbumArt => _discordRpcEnabled;
     public bool CanGoBack => _page != DashboardPage.Overview;
-    public bool CanGoForward => _page != DashboardPage.Settings;
+    public bool CanGoForward => _page is not DashboardPage.Settings and not DashboardPage.AlbumArt;
     public string DataTitle => _dataView switch { DataView.Albums => "Top albums", DataView.Artists => "Top artists", _ => "Top songs" };
     public string DataCaption => TopCaption;
     public string DataContextColumn => _dataView switch { DataView.Albums => "TRACKS", DataView.Artists => "TOP ALBUM", _ => "ALBUM" };
@@ -184,6 +240,85 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
             SavePreferences();
             OnPropertyChanged();
         }
+    }
+
+    public bool DiscordRpcEnabled
+    {
+        get => _discordRpcEnabled;
+        set
+        {
+            if (_discordRpcEnabled == value) return;
+            _discordRpcEnabled = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(CanManageAlbumArt));
+            SaveDiscordSettings();
+        }
+    }
+
+    public bool DetectStalledPlayback
+    {
+        get => _detectStalledPlayback;
+        set
+        {
+            if (_detectStalledPlayback == value) return;
+            _detectStalledPlayback = value;
+            OnPropertyChanged();
+            SavePreferences();
+            if (_discordRpcEnabled) StartDiscordPresence();
+        }
+    }
+
+    public bool KeepDiscordPresenceBetweenTracks
+    {
+        get => _keepDiscordPresenceBetweenTracks;
+        set
+        {
+            if (_keepDiscordPresenceBetweenTracks == value) return;
+            _keepDiscordPresenceBetweenTracks = value;
+            OnPropertyChanged();
+            SavePreferences();
+            if (_discordRpcEnabled) StartDiscordPresence();
+        }
+    }
+
+    public string DiscordApplicationId
+    {
+        get => _discordApplicationId;
+        set => Set(ref _discordApplicationId, value);
+    }
+
+    public DiscordAlbumArtMapping? SelectedAlbumArtMapping
+    {
+        get => _selectedAlbumArtMapping;
+        set
+        {
+            if (_selectedAlbumArtMapping == value) return;
+            _selectedAlbumArtMapping = value;
+            OnPropertyChanged();
+            if (value is null) return;
+            AlbumArtArtist = value.AlbumArtist;
+            AlbumArtTitle = value.AlbumTitle;
+            AlbumArtAssetKey = value.AssetKey;
+            RefreshAlbumArtPreview();
+        }
+    }
+
+    public string AlbumArtArtist
+    {
+        get => _albumArtArtist;
+        set { if (Set(ref _albumArtArtist, value)) RefreshAlbumArtPreview(); }
+    }
+
+    public string AlbumArtTitle
+    {
+        get => _albumArtTitle;
+        set { if (Set(ref _albumArtTitle, value)) RefreshAlbumArtPreview(); }
+    }
+
+    public string AlbumArtAssetKey
+    {
+        get => _albumArtAssetKey;
+        set => Set(ref _albumArtAssetKey, value);
     }
 
     public string SelectedGraphRange
@@ -311,12 +446,14 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(GraphsVisibility));
         OnPropertyChanged(nameof(DataVisibility));
         OnPropertyChanged(nameof(SettingsVisibility));
+        OnPropertyChanged(nameof(AlbumArtVisibility));
         OnPropertyChanged(nameof(CanGoBack));
         OnPropertyChanged(nameof(CanGoForward));
         OnPropertyChanged(nameof(DataTitle));
         OnPropertyChanged(nameof(DataCaption));
         OnPropertyChanged(nameof(DataContextColumn));
         if (_page == DashboardPage.Settings) RefreshSchedulerState();
+        if (_page == DashboardPage.AlbumArt) RefreshAlbumArtPreview();
     }
 
     private void MovePage(int direction)
@@ -837,10 +974,178 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
         }
     }
 
-    private void SavePreferences() => _settingsStore.Save(new DashboardPreferences(_includeBaselineSnapshot, _openInWmpOnDoubleClick));
+    private void SaveDiscordSettings()
+    {
+        if (!_discordRpcEnabled)
+        {
+            SavePreferences();
+            _discordPresence.Stop();
+            return;
+        }
+
+        if (!TryNormalizeDiscordApplicationId(out var applicationId))
+        {
+            _discordRpcEnabled = false;
+            OnPropertyChanged(nameof(DiscordRpcEnabled));
+            OnPropertyChanged(nameof(CanManageAlbumArt));
+            DiscordStatus = "Enter a valid numeric Discord Application ID before enabling Rich Presence";
+            DiscordLastError = "Discord Application IDs contain digits only.";
+            SavePreferences();
+            _discordPresence.Stop();
+            return;
+        }
+
+        _discordApplicationId = applicationId;
+        OnPropertyChanged(nameof(DiscordApplicationId));
+        SavePreferences();
+        StartDiscordPresence();
+    }
+
+    private void StartDiscordPresence()
+    {
+        if (!TryNormalizeDiscordApplicationId(out var applicationId))
+        {
+            DiscordStatus = "Enter a valid numeric Discord Application ID before enabling Rich Presence";
+            return;
+        }
+
+        _discordApplicationId = applicationId;
+        _discordPresence.Start(CreateDiscordPreferences());
+    }
+
+    private void ReconnectDiscord()
+    {
+        if (!_discordRpcEnabled)
+        {
+            DiscordStatus = "Enable Discord Rich Presence first";
+            return;
+        }
+        SaveDiscordSettings();
+    }
+
+    private void SaveAlbumArtMapping()
+    {
+        var artist = DiscordAlbumArtMapping.Normalize(AlbumArtArtist);
+        var title = DiscordAlbumArtMapping.Normalize(AlbumArtTitle);
+        var assetKey = AlbumArtAssetKey.Trim();
+        if (string.IsNullOrWhiteSpace(artist) || string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(assetKey))
+        {
+            AlbumArtPreviewStatus = "Album artist, album title, and Discord asset key are all required";
+            return;
+        }
+
+        var mapping = new DiscordAlbumArtMapping(artist, title, assetKey);
+        var existingIndex = AlbumArtMappings
+            .Select((candidate, index) => (candidate, index))
+            .FirstOrDefault(entry => string.Equals(DiscordAlbumArtMapping.Normalize(entry.candidate.AlbumArtist), artist, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(DiscordAlbumArtMapping.Normalize(entry.candidate.AlbumTitle), title, StringComparison.OrdinalIgnoreCase)).index;
+        var matching = AlbumArtMappings.FirstOrDefault(candidate => string.Equals(DiscordAlbumArtMapping.Normalize(candidate.AlbumArtist), artist, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(DiscordAlbumArtMapping.Normalize(candidate.AlbumTitle), title, StringComparison.OrdinalIgnoreCase));
+
+        if (matching is null) AlbumArtMappings.Add(mapping);
+        else AlbumArtMappings[existingIndex] = mapping;
+        SelectedAlbumArtMapping = mapping;
+        SavePreferences();
+        if (_discordRpcEnabled) StartDiscordPresence();
+        AlbumArtPreviewStatus = "Mapping saved locally. Discord resolves the configured asset key when it receives the presence.";
+    }
+
+    private void DeleteAlbumArtMapping()
+    {
+        if (SelectedAlbumArtMapping is not { } mapping) return;
+        AlbumArtMappings.Remove(mapping);
+        SelectedAlbumArtMapping = null;
+        AlbumArtArtist = "";
+        AlbumArtTitle = "";
+        AlbumArtAssetKey = "";
+        SavePreferences();
+        if (_discordRpcEnabled) StartDiscordPresence();
+        RefreshAlbumArtPreview();
+    }
+
+    private void UseCurrentTrackForAlbumArt()
+    {
+        if (_discordPresence.CurrentPlayback is not { HasMedia: true } playback)
+        {
+            AlbumArtPreviewStatus = "Start a track in Windows Media Player, then try again";
+            return;
+        }
+
+        SelectedAlbumArtMapping = null;
+        AlbumArtArtist = playback.EffectiveAlbumArtist;
+        AlbumArtTitle = playback.Album;
+        AlbumArtAssetKey = "";
+        RefreshAlbumArtPreview();
+    }
+
+    private void RefreshAlbumArtPreview()
+    {
+        var current = _discordPresence.CurrentPlayback;
+        if (current is { HasMedia: true })
+        {
+            var localArtwork = AlbumArtResolver.For(current);
+            AlbumArtPreview = localArtwork ?? AlbumArtResolver.DiscordFallback();
+            AlbumArtPreviewStatus = localArtwork is null
+                ? "No local cover was found for the current WMP track; showing the bundled fallback preview"
+                : "Local cover found for the current WMP track. Discord asset availability is verified by Discord when sent.";
+            return;
+        }
+
+        var artist = DiscordAlbumArtMapping.Normalize(AlbumArtArtist);
+        var album = DiscordAlbumArtMapping.Normalize(AlbumArtTitle);
+        var historicalTrack = _snapshots.Reverse().SelectMany(snapshot => snapshot.Tracks).FirstOrDefault(track =>
+            string.Equals(DiscordAlbumArtMapping.Normalize(track.Artist), artist, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(DiscordAlbumArtMapping.Normalize(track.Album), album, StringComparison.OrdinalIgnoreCase));
+        AlbumArtPreview = historicalTrack is null ? AlbumArtResolver.DiscordFallback() : AlbumArtResolver.For(historicalTrack) ?? AlbumArtResolver.DiscordFallback();
+        AlbumArtPreviewStatus = historicalTrack is null
+            ? "No local matching track was found; showing the bundled fallback preview"
+            : "Previewing locally resolved artwork from the selected album";
+    }
+
+    private void OnDiscordStatusChanged(DiscordRpcStatus status)
+    {
+        void Apply()
+        {
+            DiscordStatus = status.Summary;
+            DiscordNowPlaying = string.IsNullOrWhiteSpace(status.NowPlaying) ? "No status is being shared" : status.NowPlaying;
+            DiscordArtworkStatus = string.IsNullOrWhiteSpace(status.Artwork) ? "Fallback asset: wmp_empty" : status.Artwork;
+            DiscordLastError = status.LastError;
+            DiscordLastUpdated = status.LastUpdatedAtUtc is { } updated ? $"Last update {ToEastern(updated):h:mm:ss tt}" : "";
+            RefreshAlbumArtPreview();
+        }
+
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher is null || dispatcher.CheckAccess()) Apply();
+        else dispatcher.BeginInvoke(new Action(Apply));
+    }
+
+    private DiscordRpcPreferences CreateDiscordPreferences() => new(
+        _discordRpcEnabled,
+        _discordApplicationId.Trim(),
+        _detectStalledPlayback,
+        AlbumArtMappings.ToArray(),
+        _keepDiscordPresenceBetweenTracks);
+
+    private bool TryNormalizeDiscordApplicationId(out string applicationId)
+    {
+        applicationId = _discordApplicationId.Trim();
+        return applicationId.Length is >= 17 and <= 20 && applicationId.All(char.IsDigit);
+    }
+
+    private void SavePreferences() => _settingsStore.Save(new DashboardPreferences(
+        _includeBaselineSnapshot,
+        _openInWmpOnDoubleClick,
+        CreateDiscordPreferences()));
 
     private static void OpenScheduler() => Process.Start(new ProcessStartInfo("taskschd.msc") { UseShellExecute = true });
     private static void OpenGitHub() => Process.Start(new ProcessStartInfo(Environment.GetEnvironmentVariable("WMPL_WRAP_REPOSITORY_URL") ?? DefaultRepositoryUrl) { UseShellExecute = true });
+    private void OpenDiscordDeveloperPortal()
+    {
+        var target = TryNormalizeDiscordApplicationId(out var applicationId)
+            ? $"https://discord.com/developers/applications/{applicationId}/rich-presence/assets"
+            : "https://discord.com/developers/applications";
+        Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
+    }
     private static void OpenReleases()
     {
         var repositoryUrl = Environment.GetEnvironmentVariable("WMPL_WRAP_REPOSITORY_URL") ?? DefaultRepositoryUrl;
@@ -877,8 +1182,20 @@ public sealed class DashboardViewModel : INotifyPropertyChanged
     }
     private void ClearAll() { LatestSnapshotTracks.Clear(); TopTracks.Clear(); TopAlbums.Clear(); TopArtists.Clear(); DataRows.Clear(); TotalListens = "-"; TotalListeningTime = "-"; MetricTopArtist = "-"; MetricTopArtistCount = ""; }
     private static DateTimeOffset ToEastern(DateTimeOffset utc) => TimeZoneInfo.ConvertTimeBySystemTimeZoneId(utc, "Eastern Standard Time");
-    private void Set<T>(ref T field, T value, [CallerMemberName] string? property = null) { if (EqualityComparer<T>.Default.Equals(field, value)) return; field = value; OnPropertyChanged(property); }
+    private bool Set<T>(ref T field, T value, [CallerMemberName] string? property = null)
+    {
+        if (EqualityComparer<T>.Default.Equals(field, value)) return false;
+        field = value;
+        OnPropertyChanged(property);
+        return true;
+    }
     private void OnPropertyChanged([CallerMemberName] string? property = null) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(property));
+
+    public void Dispose()
+    {
+        _discordPresence.StatusChanged -= OnDiscordStatusChanged;
+        _discordPresence.Dispose();
+    }
 }
 
 internal static class GitHubReleaseChecker
@@ -938,7 +1255,7 @@ public sealed record DashboardSong(int Rank, string Title, string ArtistAlbum, s
 
 public sealed record DashboardAggregate(string Title, string Subtitle, string CountLabel, ImageSource? Artwork, WmpOpenTarget OpenTarget) : IOpenInWmpTarget;
 public sealed record DashboardDataRow(int Rank, string Title, string Subtitle, string Context, string CountLabel, ImageSource? Artwork, WmpOpenTarget OpenTarget) : IOpenInWmpTarget;
-public sealed record DashboardGraphLegendItem(string Name, Brush Color);
+public sealed record DashboardGraphLegendItem(string Name, System.Windows.Media.Brush Color);
 public sealed record DashboardSnapshotOption(DateTimeOffset CapturedAtUtc, string Label)
 {
     public override string ToString() => Label;
@@ -975,7 +1292,10 @@ public sealed record DashboardSnapshotChange(int Rank, string Title, string Arti
     }
 }
 internal sealed record TrackTally(TrackSnapshot Track, long Count);
-internal sealed record DashboardPreferences(bool IncludeBaselineSnapshot = true, bool OpenInWmpOnDoubleClick = true);
+internal sealed record DashboardPreferences(
+    bool IncludeBaselineSnapshot = true,
+    bool OpenInWmpOnDoubleClick = true,
+    DiscordRpcPreferences? DiscordRpc = null);
 
 internal sealed class DashboardSettingsStore(string dataDirectory)
 {
@@ -1004,7 +1324,7 @@ internal sealed class DashboardSettingsStore(string dataDirectory)
     }
 }
 
-internal enum DashboardPage { Overview, Graphs, Data, LatestSnapshot, Settings }
+internal enum DashboardPage { Overview, Graphs, Data, LatestSnapshot, Settings, AlbumArt }
 internal enum DataView { Tracks, Albums, Artists }
 
 internal sealed class RelayCommand(Action<object?> execute) : ICommand

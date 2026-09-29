@@ -14,6 +14,12 @@ public partial class MainWindow : Window
         DataContext = new DashboardViewModel();
     }
 
+    protected override void OnClosed(EventArgs e)
+    {
+        if (DataContext is IDisposable disposable) disposable.Dispose();
+        base.OnClosed(e);
+    }
+
     protected override void OnSourceInitialized(EventArgs e)
     {
         base.OnSourceInitialized(e);

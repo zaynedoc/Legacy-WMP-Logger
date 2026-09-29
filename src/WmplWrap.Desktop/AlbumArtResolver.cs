@@ -18,6 +18,21 @@ internal static class AlbumArtResolver
         return source is null || !File.Exists(source) ? null : FromEmbeddedArt(source);
     }
 
+    public static ImageSource? For(WmpPlaybackSnapshot playback) => For(new TrackSnapshot(
+        "discord-live-preview",
+        playback.SourceUrl,
+        playback.Title,
+        playback.Artist,
+        playback.Album,
+        playback.Duration,
+        0));
+
+    public static ImageSource? DiscordFallback()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "Assets", "Discord", "wmp_empty.png");
+        return File.Exists(path) ? FromFile(path) : null;
+    }
+
     private static ImageSource? FromFile(string path)
     {
         if (Cache.TryGetValue(path, out var image)) return image;

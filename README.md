@@ -2,7 +2,7 @@
 
 **A local listening-history companion for Windows Media Player Legacy**
 
-**Current version:** `v1.1.0` · [Releases](https://github.com/zaynedoc/WMPL-Wrap/releases) · [Privacy](PRIVACY.md) · [MIT License](LICENSE)
+**Current version:** `v1.2.0` · [Releases](https://github.com/zaynedoc/WMPL-Wrap/releases) · [Privacy](PRIVACY.md) · [Terms](TERMS.md) · [MIT License](LICENSE)
 
 WMPL Wrap turns Windows Media Player's cumulative play counts into a personal
 listening history. It captures local snapshots, compares them over time, and presents
@@ -16,6 +16,7 @@ your top songs, albums, artists, and latest listening changes in a native Window
 - Shows overview, snapshot history, top-song, top-album, and top-artist views
 - Can schedule one daily local snapshot through Windows Task Scheduler
 - Lets users manually check GitHub Releases for a newer signed version
+- Includes optional Discord Rich Presence for the currently playing WMP track
 
 ## How the history works
 
@@ -43,21 +44,20 @@ results:
 - Album
 - Duration
 
-The `data` directory is ignored by Git. Artwork is read locally—from WMP artwork
-references, nearby cover files, or embedded artwork—and is never looked up online.
-See [PRIVACY.md](PRIVACY.md) for the full local-data notice.
+The `data` directory is ignored by Git. Artwork is read locally, from WMP artwork
+references, and is never looked up online. See [PRIVACY.md](PRIVACY.md) for the full local-data notice.
 
 ## Run the desktop app
 
-### Development
+### Development:
 
-Requires the .NET 10 SDK and Windows Media Player Legacy. Verify the build by running:
+Requires the .NET 10 SDK and Windows Media Player Legacy. In project dir, verify the build and run with:
 
 ```powershell
 dotnet run --project src/WmplWrap.Desktop
 ```
 
-### Standalone build
+### Standalone build:
 
 Create a self-contained, single-file desktop build:
 
@@ -107,7 +107,7 @@ dotnet run --project src/WmplWrap -- report --from 2026-09-01 --to 2026-09-30 --
 local snapshot. `--from` and `--to` accept Eastern calendar dates (`yyyy-MM-dd`) or
 ISO-8601 timestamps; ranges are inclusive and the report prints the snapshots it used.
 
-## Automatic daily snapshots
+### Automatic daily snapshots:
 
 First publish the command-line logger. This replaces the local publish output; it does
 not create duplicate scheduled tasks.
@@ -126,6 +126,28 @@ To stop automatic snapshots without deleting recorded history:
 ```powershell
 Unregister-ScheduledTask -TaskName "WMPL Wrap Daily Snapshot" -Confirm:$false
 ```
+
+## Discord Rich Presence
+
+- **Default:** Off. Enable it in **Settings** to share the active WMP track through the
+  locally running Discord desktop client.
+- **Presence:** Shows the title, by artist, playback state, and the selected Discord
+  artwork key. Snapshot history and media files are never sent to WMPL Wrap or Discord.
+- **Elapsed time:** Starts from WMP's current position, recalibrates after a seek, and is
+  hidden while paused.
+- **Track changes:** Keeps the last activity for up to five seconds during WMP's brief
+  no-track handoff. Disable that option in Settings to clear Discord immediately.
+- **Default application:** `1553580075688009838`, named **Windows Media Player**, with
+  `wmp_icon` and `wmp_empty` uploaded as Rich Presence assets.
+- **Album art:** Use **Settings → Discord Rich Presence → Album art** to map an exact
+  album artist and album title to an uploaded Discord asset key. The preview is local;
+  Discord resolves whether an uploaded asset exists.
+- **Custom application ID:** Upload `wmp_icon`, `wmp_empty`, and each configured album-art
+  key to that Discord application. Its Developer Portal name is what Discord displays.
+
+### RPC logic credit:
+
+The rich presence logic and user experience were referenced from [Windows Media Player Discord RPC](https://github.com/T0biasCZe/Windows-Media-Player-Discord-RPC) by [@T0biasCZe](https://github.com/T0biasCZe). As per MPL-2.0 licensing, WMPL Wrap contains an independent implementation, and does not include any source code from T0biasCZe's project.
 
 ## Project notes
 

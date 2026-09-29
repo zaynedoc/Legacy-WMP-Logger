@@ -26,6 +26,20 @@ WMPL Wrap does not include analytics, advertising, crash-reporting, user
 accounts, cloud sync, or a service that uploads your library or listening data.
 It does not send snapshot data to the developer or to third parties.
 
+## Optional Discord Rich Presence
+
+Discord Rich Presence is disabled by default. If you enable it, WMPL Wrap reads the
+current Windows Media Player title, artist, album, playback state, and local playback
+position to produce a Discord status. It sends the title, artist, paused state, and
+selected Discord image asset keys to the Discord desktop client running on your computer.
+The Discord client may then display that activity according to your Discord account and
+privacy settings.
+
+WMPL Wrap does not send the media file, local file path, snapshot history, or album-art
+image file to Discord. Album-art mappings, your chosen Discord Application ID, and the
+feature settings are stored only in WMPL Wrap's local settings file. Discord Developer
+Portal image assets are managed by you and are subject to Discord's own practices.
+
 The **View on GitHub** button opens GitHub in your browser. The optional
 **Check for updates** button makes a request to GitHub only when you select it,
 to read the latest public release's version and link; it does not send library
